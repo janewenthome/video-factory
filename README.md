@@ -1,17 +1,16 @@
-# Video Factory (Codex + Colab + Mac mini M4 混合式 AI 剪輯系統)
+# Video Factory (Codex + Mac mini M4 local-first; optional Colab perception)
 
-這是一套設計給長期重複使用的 AI 智慧影片剪輯系統。
-由 **Antigravity/Gemini** 擔任 editorial director，**Mac mini M4** 負責 proxy、FFmpeg、檔案處理與最終渲染，**Google Colab** 是隨選即用的 **COLAB PERCEPTION WORKER**，只處理需要 CUDA 的語音、視覺語意與 shortlist temporal evidence。
+這是一套可重複使用的 AI 影片剪輯系統：**Antigravity/Gemini** 負責最終故事與剪輯決策，**Codex** 協調工具、計畫驗證與本機執行，**Mac mini M4** 負責素材處理、本機語音推論、proxy、FFmpeg 與最終渲染；**Claude Opus** 可作選擇性深度複核。Colab perception adapter 保留為未來擴充，目前不在執行路徑。
 
 ---
 
 ## 目前可用範圍
 
-目前提供 Python CLI、確定性媒體處理工具、Colab CLI adapter、音樂搜尋命令，以及供桌面程式呼叫的 application service。`apps/ai-video-studio/` 是未來 Tauri GUI 的介面規格；完整桌面 GUI 尚未實作。故事和剪輯決策仍需由導演模型或使用者審閱。
+目前提供 Python CLI、本機確定性媒體處理工具、可選雲端 adapter、音樂搜尋命令，以及供桌面程式呼叫的 application service。`apps/ai-video-studio/` 是未來 Tauri GUI 的介面規格；完整桌面 GUI 尚未實作。故事與字幕判斷由導演模型或使用者確認；renderer 不自行推斷故事或改寫語音。
 
 ## 開始使用
 
-需求：Python 3.11+、FFmpeg/ffprobe；本機 render 需要 Node.js、pnpm 和 Remotion runtime。Colab inference 另外需要 Google Colab CLI、已授權帳戶與本次衍生檔上傳同意。Colab MCP 是可選的互動除錯工具。
+需求：Python 3.11+、FFmpeg/ffprobe；本機 render 需要 Node.js、pnpm 和 Remotion runtime。Apple Silicon 語音推論使用 `mlx-whisper==0.4.3`；預設重用固定版 `mlx-community/whisper-large-v3-mlx` snapshot，並且只查本機快取，不自動下載權重。只有明確加入 `--allow-model-download` 才會在 cache miss 時下載。
 
 ```bash
 # 建立新專案，先檢查 job.draft.yaml，再核准為 job.yaml
@@ -21,7 +20,7 @@ python3 skills/video-factory/scripts/video_factory.py init projects/my-family-ed
 python3 -m video_editor prepare projects/my-family-edit --mode family
 
 # 建立本機 perception index；此步驟不會上傳檔案
-python3 -m video_editor perception projects/my-family-edit --privacy-mode BALANCED
+python3 -m video_editor perception projects/my-family-edit --privacy-mode LOCAL_ONLY
 
 # 驗證 edit plan；依 skill 建立並審閱 edit_plan.json 後才能 render
 python3 skills/video-factory/scripts/video_factory.py validate-plan projects/my-family-edit
@@ -29,11 +28,36 @@ python3 skills/video-factory/scripts/video_factory.py validate-plan projects/my-
 
 每個 project 的來源素材放在 `assets/`，本機 cache 和衍生物放在 `work/`，交付物放在 `outputs/`。私人 project 資料不得提交到公開 repository。
 
-### Colab 與隱私
+### 本機分析、字幕與隱私
 
-Colab 預設用 T4 處理語音和視覺 embedding；L4 僅供 MAX_QUALITY 下明確指定的 temporal shortlist，A100/H100 不會自動申請。`LOCAL_ONLY` 不上傳；`BALANCED` 可允許選定衍生音訊、代表影格及低解析 proxy，目前的第一階段實際只傳音訊和代表影格；`MAX_QUALITY` 只允許 shortlist 後的少量 720p proxy。原始 4K 和整個素材庫不得上傳。
+先完成剪輯計畫，再對保留片段中偵測到語音的音訊產生本機逐字稿候選與時間戳，讓字幕與最後時間軸對齊。指定導演模型或使用者檢查每句在上下文中的意義；Codex 將明確的 keep/drop 決定寫入審核記錄：有意義的語音保留字幕；無意義、噪音、幻覺或無法辨識的片段不燒字幕；不確定內容標記人工確認，不自行補寫。輸出前驗證 SRT 時間範圍與重疊。
 
-先檢查 `work/perception_index.json` 的 eligible upload 清單。雲端分析前，必須就該次實際衍生檔取得明確同意，再以 `colab-perception ... --allow-upload` 執行。詳見 [Colab setup](docs/COLAB_SETUP.md) 和 [Colab privacy contract](skills/video-factory/references/colab.md)。
+安裝本機語音辨識 backend：
+
+```bash
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python -r requirements-local.txt
+```
+
+先建立並確認 `edit_plan.json`，再只對保留現場聲的影片片段產生字幕候選：
+
+```bash
+.venv/bin/python skills/video-factory/scripts/video_factory.py draft-captions projects/my-family-edit --language zh
+```
+
+若你已有其他 MLX Whisper 模型快取，可用 `--model` 與 `--model-revision` 指定該快照；CLI 預設不下載模型，只有加 `--allow-model-download` 才允許取得缺少的權重。revision 可從 Hugging Face cache 的 snapshot 目錄取得。
+
+Codex 閱讀 `work/transcripts/caption_candidates.json`，對每個候選寫入 `work/transcripts/caption_review.json`。該檔必須保留候選中的 `edit_plan_sha256` 和 `candidate_set_sha256`，並為每個候選指定 `keep` 或 `drop` 及理由；未決定的候選不會套用。完成語意審閱後：
+
+```bash
+.venv/bin/python skills/video-factory/scripts/video_factory.py apply-caption-review projects/my-family-edit --review work/transcripts/caption_review.json
+.venv/bin/python skills/video-factory/scripts/video_factory.py validate-plan projects/my-family-edit
+.venv/bin/python skills/video-factory/scripts/video_factory.py export-srt projects/my-family-edit
+```
+
+若候選都是噪音、幻覺、純語助詞或無法辨識片段，標記 `drop`；有意義內容保留原意，不自行改寫。SRT 僅在通過時間、重疊和片長驗證後交給 renderer。
+
+目前工作流程不啟動 Colab，不上傳音訊、影格或影片。Colab worker code 保留為未來可選擴充；[Google Colab MCP](https://github.com/googlecolab/colab-mcp) 要求 client 支援動態 `notifications/tools/list_changed`，而 [Codex issue #43642](https://github.com/openai/codex/issues/43642) 記錄了非同步啟動時工具清單未刷新的情形，因此先暫緩使用。未來任何雲端服務都必須先列出實際衍生檔並取得該次同意。原始 4K 與整個素材庫都不應上傳。
 
 ### 音樂搜尋
 
@@ -58,11 +82,11 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 
 1. 本機 Python 和 ffprobe 盤點每個檔案、計算 SHA-256，並快取 metadata。
 2. FFmpeg/VideoToolbox 產生場景候選、proxy、代表影格、接觸表與抽取音訊；素材本身保持不變。
-3. 建立 `work/perception_index.json`。`LOCAL_ONLY` 完全本機；`BALANCED`（預設）允許選定音訊、代表影格和低解析 proxy，目前 routine worker 只傳音訊與代表影格；`MAX_QUALITY` 只把 shortlist 後的少數 720p proxy 交給 temporal backend。原始 4K 永不上傳。
-4. 若已授權，Colab Perception Worker 執行 VAD、faster-whisper `large-v3-turbo`、必要 word timestamps、匿名 speaker metadata、SigLIP2 embeddings、相似度、duplicate clusters 和候選分組；結果下載回 Mac，session 於成功與失敗路徑都釋放。
-5. Antigravity/Gemini 依 profile、transcript、perception evidence 與素材資料決定故事、片段、節奏，建立 `story_plan.json` 和 `edit_plan.json`。
-6. Antigravity/Gemini 把導演決策交給 pipeline 寫入 `work/edit-plan/edit_plan.json`；Codex 負責 orchestration 與驗證。驗證器檢查路徑、時間範圍和公衛 claim references。
-7. 本機 Remotion 依 edit plan 合成畫面、燒錄字幕、調整配樂音量並輸出 MP4；FFmpeg/ffprobe 執行媒體檢查。
+3. 建立 `work/perception_index.json`，只記錄本機可取得的 metadata 與推論證據；缺少的元件標記為 pending/not configured。
+4. Antigravity/Gemini 導演依 profile、transcript、perception evidence 與素材資料決定故事、片段、節奏和情緒走向；Codex 將核定方向寫成 `story_plan.json`、`edit_plan.json` 並驗證。
+5. 依已確認的 edit plan，對保留且含語音的片段執行本機轉錄，再將時間戳映射到輸出時間軸；指定導演模型或使用者判斷字幕是否有意義，Codex 記錄 keep/drop。只省略被判定無意義的字幕，不改寫或編造語音。
+6. 驗證器檢查素材路徑、時間範圍、公衛 claim references 與字幕 cue；Codex 協調和審閱結果。
+7. 本機 Remotion 依 edit plan 合成畫面、燒錄經審閱字幕、調整配樂音量並輸出 MP4；FFmpeg/ffprobe 執行媒體檢查。
 8. 音樂流程先寫 `work/music_requirements.json`（同步鏡像至 `outputs/work/`）；SAFE_AUTO 只接受 Public Domain、CC0、CC BY 且有上游證據的曲目。搜尋或授權失敗時無音樂完成，並產生 `work/music_attribution.json`、`outputs/work/music_attribution.json`、`outputs/final/music_attribution.json`、`outputs/MUSIC_CREDITS.txt`、`outputs/PUBLISHING_CREDITS.txt`。
 9. Skill 匯出 SRT、QA 報告與少量人工 review notes。修改時沿用 hash 未變的檢查、影格、perception 與分析結果，只重做受影響的步驟。
 
@@ -84,17 +108,16 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 
 | 功能 | 執行位置 | 備註 |
 |---|---|---|
-| metadata、SHA-256 cache、proxy、scene detection、影格和接觸表 | Mac M4 | 不上傳原始素材 |
-| Speech/visual/temporal perception | Google Colab CLI | 只傳 derived data；預設 T4；L4 僅 shortlist temporal；必須先取得本次同意並以 `--allow-upload` 執行 |
-| 故事／剪輯決策、edit plan | Antigravity/Gemini director；Codex orchestration | 以 transcript、metadata、perception evidence 和 contact sheet 作依據 |
+| metadata、SHA-256 cache、proxy、scene detection、frames/contact sheets、speech transcription | Mac mini M4 | 本機執行；已驗證 MLX Whisper 在一台 Apple Silicon 環境對短剪輯做 live inference；每個專案仍需人工檢查辨識內容；不自動上傳 |
+| 故事／剪輯決策 | Antigravity/Gemini 導演 | Codex 將核定方向落成 edit plan；perception 分數只作線索 |
+| 字幕語意審閱 | 指定導演模型／使用者；Codex 記錄決定 | 有意義內容保留，無意義 cue 可省略，不改寫原話 |
 | Remotion render、FFmpeg、SRT 匯出與 QA | Mac M4 | 最終編碼不使用 Colab GPU |
-| Colab notebook 互動除錯 | Google Colab MCP | 只在目前 Codex 工作階段確實出現 notebook tools 時使用；否則回到 CLI |
-| OAuth、Colab GUI 檢查與視覺 QA | Computer Use | GUI 需要時才使用；不以滑鼠操作 timeline |
-| Editorial director | Antigravity/Gemini；必要時 Claude Opus review | perception score 不等於 keep；GUI 呼叫 `video_editor.application.VideoFactoryApplication`，不解析 stdout |
-| OpenAI timestamp transcription | 使用者明確選用時 | 可保留作另一個 provider；和 Colab 分開授權，不會在 Colab 失敗時自動改送 OpenAI。參數見 [Transcriptions API](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create) 與 [Speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text)。 |
+| Colab notebook / GPU perception | Optional, currently deferred | Codex dynamic MCP tool refresh support is not available reliably; no current inference/upload path |
+| 視覺 QA | 人工檢視 / Computer Use when needed | 不以滑鼠操作 timeline |
+| Optional external transcription | 使用者明確選用時 | 需要單獨、逐次授權；不作為本機或 Colab 失敗時的自動 fallback。 |
 | TTS 旁白 | 尚未接入 | 預設關閉；建立旁白文稿後才考慮接入與計費 |
 
-Colab CLI 與 MCP 是否可用取決於各自的本機安裝；可用 `colab version` 和 `codex mcp list` 檢查。SigLIP2、ECAPA 匿名說話者分群與 SmolVLM2 temporal adapter 已有實作與 pinned model revision，但 live GPU 執行、CU 消耗、模型輸出品質仍須分開驗證。SpeechBrain 的 speaker label 僅在單一音檔內分群，不識別真實身分、不處理重疊語音，信心值未校準。Audio event detection 與 speech importance scoring 仍標記為未配置，不應當作已完成能力。真實素材雲端分析仍需 OAuth、usage 查驗及每次精確 derived-data 授權。沒使用雲端時仍可完成素材盤點、perception index 的本機證據、故事規劃、edit plan、Remotion render、SRT 和技術 QA。OpenAI key 只能由 `OPENAI_API_KEY` 環境變數提供；範例檔 `.env.example` 不含真實金鑰。TTS 尚未接入。
+Apple Silicon local Whisper supports cut-first transcription and word-level timestamps. A live run on one M4 processed a few short retained clips using an already-cached MLX Whisper large-v3 snapshot; this is not a general speed or accuracy benchmark. Recording conditions and model version affect transcription quality, so review every candidate. The existing SigLIP2, anonymous speaker and temporal adapters have not completed live Colab inference or GPU/CU benchmarks and are not used by the current workflow. Audio event detection and speech-importance scoring remain unconfigured. Local-only mode supports asset inventory, local perception evidence, story/edit planning, Remotion rendering, SRT export and technical QA. OpenAI keys must only be supplied via `OPENAI_API_KEY`; `.env.example` contains no real key. TTS is not connected.
 
 不要自動下載音樂。`music-library/manifest.yaml` 只列出使用者擁有或明確有權使用的曲目。
 
@@ -103,7 +126,7 @@ Colab CLI 與 MCP 是否可用取決於各自的本機安裝；可用 `colab ver
 - `skills/video-factory/SKILL.md`：Codex 入口與工作流程。
 - `skills/video-factory/profiles/`：`memory` 和 `public-health` 導演偏好。
 - `skills/video-factory/templates/`：job、edit plan、素材分析與 story plan 格式。
-- `skills/video-factory/scripts/`：本機確定性工具及受同意閘門保護的 Colab worker adapter。
+- `skills/video-factory/scripts/`：本機確定性工具及保留的可選雲端 adapters。
 - `video_editor/application.py`：GUI／桌面應用呼叫的 application boundary 與結構化 progress events。
 - `skills/video-factory/scripts/perception.py`、`colab_perception.py`：Perception Index 與 derived-data Colab worker。
 - `skills/video-factory/references/colab.md`：Colab CLI、MCP、Computer Use 的分工與授權流程。
@@ -123,9 +146,6 @@ python3 <SKILL_DIR>/scripts/video_factory.py build-contact-sheets <PROJECT>
 python3 <SKILL_DIR>/scripts/video_factory.py validate-plan <PROJECT>
 python3 <SKILL_DIR>/scripts/video_factory.py prepare-render <PROJECT> --ratio 16:9
 python3 <SKILL_DIR>/scripts/video_factory.py export-srt <PROJECT>
-python3 <SKILL_DIR>/scripts/video_factory.py colab-transcribe <PROJECT> --source work/transcripts/audio/<hash>.flac --language zh --gpu T4 --dry-run
-python3 <SKILL_DIR>/scripts/video_factory.py colab-transcribe <PROJECT> --source work/transcripts/audio/<hash>.flac --language zh --gpu T4 --allow-upload
-python3 <SKILL_DIR>/scripts/video_factory.py transcribe <PROJECT> --source work/transcripts/audio/<hash>.flac --language zh --allow-upload
 ```
 
 `prepare-render` 產生唯一的 Remotion props 與 hash-verified 素材副本。要直接 render，從 Remotion runtime 目錄呼叫：
@@ -141,7 +161,7 @@ python3 <SKILL_DIR>/scripts/video_factory.py qa <PROJECT> --video outputs/master
 
 若 runtime 尚無 `node_modules/`，先在該 runtime 執行 `pnpm install`；不需安裝全域 Remotion。
 
-兩種 transcription CLI 都只接受 `assets/` 或 `work/transcripts/audio/` 下的支援音訊格式，在 `work/transcripts/` 產生依來源 hash 和 inference 設定命名的 timestamped JSON/SRT。Colab 版本先用 `--dry-run` 顯示傳送計畫，再由 Skill 說明指定音訊和 Google Colab、取得本次同意後才加 `--allow-upload`；worker 會關閉自己建立的 runtime。OpenAI 版本需要獨立的本次同意並使用 `OPENAI_API_KEY`。同一來源/config 的快取命中不會再次上傳。範例中的 `<hash>` 需換成 `extract-audio` 輸出 index 記錄的實際檔名。
+字幕只分析 edit plan 已保留現場音的片段。用 `draft-captions` 產生候選、由指定導演模型或使用者逐句判斷、以 `apply-caption-review` 套用明確的 keep/drop，再匯出 SRT。預設沿用本機快取，找不到模型時不下載、不改送外部服務；不會把 API 或 Colab 當成 fallback。清楚有意義的原話按詞級時間戳映射到最終 timeline；意義或轉錄不確定時不猜詞，留在審閱記錄供人工核對。
 
 Remotion runtime 版本由 `skills/video-factory/runtime/remotion/package.json` 和 lockfile 固定。若 runtime 尚無 `node_modules/`，在該目錄執行 `pnpm install`。專案提供的 Remotion Agent Skills 可放在 `.agents/skills/`；此目錄是本機開發輔助檔，不是執行核心程式的必要依賴。
 

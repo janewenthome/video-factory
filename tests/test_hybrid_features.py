@@ -18,6 +18,7 @@ from select_compute import (
     select_compute_for_task,
 )
 from video_editor.pipeline import PipelineOrchestrator, load_pipeline_state
+import video_factory
 
 
 class TestHybridFeatures(unittest.TestCase):
@@ -136,6 +137,37 @@ class TestHybridFeatures(unittest.TestCase):
         self.assertIn("開場鉤子", text)
         self.assertIn("clip1.mp4", text)
         self.assertIn("總字幕段落數：1 段", text)
+
+    def test_missing_cached_speech_model_keeps_plan_pending_without_blocking(self):
+        plan_dir = self.project / "work" / "edit-plan"
+        plan_dir.mkdir(parents=True)
+        (plan_dir / "edit_plan.json").write_text(
+            json.dumps({"duration_seconds": 4.0, "timeline": []}),
+            encoding="utf-8",
+        )
+        (self.project / "job.yaml").write_text(
+            "profile: family\nprivacy_mode: LOCAL_ONLY\ncaptions:\n  enabled: true\n",
+            encoding="utf-8",
+        )
+        events = []
+        orch = PipelineOrchestrator(
+            self.project,
+            privacy_mode="LOCAL_ONLY",
+            progress_callback=events.append,
+        )
+
+        with (
+            patch(
+                "video_editor.caption_pipeline.draft_selected_caption_candidates",
+                side_effect=video_factory.UserFacingError("cached MLX model is missing"),
+            ) as draft,
+            patch("video_editor.pipeline.prepare_music_artifacts"),
+            patch("video_editor.pipeline.generate_edit_summary", return_value=self.project / "work/edit_summary.md"),
+        ):
+            orch.run_stage_9_edit_plan()
+
+        self.assertTrue(draft.call_args.kwargs["local_files_only"])
+        self.assertTrue(any(event["stage"] == "speech" and event["status"] == "pending" for event in events))
 
     def test_pipeline_dry_run(self):
         orch = PipelineOrchestrator(self.project, dry_run=True, no_gpu=False)

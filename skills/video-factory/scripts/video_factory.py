@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic project/media helpers and approved Colab inference for video-factory.
+"""Deterministic local project/media helpers with optional cloud adapters.
 
 This CLI deliberately uses only the Python standard library. ffprobe/ffmpeg and
 optional local image metadata tools are discovered by executable path, never by
@@ -1143,7 +1143,7 @@ def add_project_argument(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="video_factory.py",
-        description="Local deterministic media helpers and approved Colab transcription for the video-factory skill.",
+        description="Local deterministic media helpers with optional cloud adapters for the video-factory skill.",
         epilog="Examples: video_factory.py init ./projects/trip --profile memory; video_factory.py inspect ./projects/trip; video_factory.py qa ./projects/trip --video outputs/master.mp4",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1164,6 +1164,39 @@ def build_parser() -> argparse.ArgumentParser:
     srt_parser = subparsers.add_parser("export-srt", help="export subtitle timeline entries to a local SRT file")
     add_project_argument(srt_parser)
     srt_parser.set_defaults(func=None)
+
+    captions_parser = subparsers.add_parser(
+        "draft-captions", help="transcribe only retained natural-audio clips locally and draft timed subtitle candidates"
+    )
+    add_project_argument(captions_parser)
+    captions_parser.add_argument(
+        "--model", default=None,
+        help="local MLX Whisper Hugging Face model (default: cached large-v3-mlx snapshot)",
+    )
+    captions_parser.add_argument("--model-revision", help="optional pinned Hugging Face snapshot revision")
+    captions_parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="use a cached model snapshot and fail without downloading if it is missing (default)",
+    )
+    captions_parser.add_argument(
+        "--allow-model-download",
+        dest="local_only",
+        action="store_false",
+        help="allow downloading the selected model if its pinned snapshot is not cached",
+    )
+    captions_parser.add_argument("--language", default="zh", help="optional Whisper language code (default: zh)")
+    captions_parser.set_defaults(func=None, local_only=True)
+
+    caption_review_parser = subparsers.add_parser(
+        "apply-caption-review", help="apply an explicit AI/human keep/drop review to subtitle candidates"
+    )
+    add_project_argument(caption_review_parser)
+    caption_review_parser.add_argument(
+        "--review", required=True,
+        help="project-relative review JSON under work/ with candidate and plan hashes",
+    )
+    caption_review_parser.set_defaults(func=None)
 
     transcribe_parser = subparsers.add_parser(
         "transcribe", help="optionally upload one project audio source for timestamped transcription"
@@ -1281,6 +1314,16 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError as exc:
             raise UserFacingError(f"Media helper could not be loaded: {exc}") from exc
     try:
+        if args.command in {"draft-captions", "apply-caption-review"}:
+            try:
+                repo_root = SCRIPT_DIR.parents[2]
+                if str(repo_root) not in sys.path:
+                    sys.path.insert(0, str(repo_root))
+                from video_editor.caption_pipeline import command_apply_caption_review, command_draft_captions
+            except ImportError as exc:
+                raise UserFacingError(f"Local caption workflow could not be loaded: {exc}") from exc
+            command = command_draft_captions if args.command == "draft-captions" else command_apply_caption_review
+            return command(args)
         if args.command in {"transcribe", "colab-transcribe"}:
             try:
                 sys.modules.setdefault("video_factory", sys.modules[__name__])

@@ -196,12 +196,12 @@ def command_music_add(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="video_editor",
-        description="Unified Hybrid AI Video Editing System (Codex + Colab + Mac mini M4)",
+        description="Codex-coordinated local-first video editing on Mac mini M4, with optional deferred cloud adapters",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # run command
-    run_parser = subparsers.add_parser("run", help="Run the complete hybrid editing pipeline")
+    run_parser = subparsers.add_parser("run", help="Run the Mac-first editing pipeline; cloud processing stays opt-in")
     run_parser.add_argument("target", help="Project path or raw materials directory (e.g. materials/raw)")
     run_parser.add_argument("--mode", choices=("family", "health_education", "memory", "public-health"), default="family", help="editing mode / profile")
     run_parser.add_argument("--resume", action="store_true", default=True, help="resume from last completed stage")
@@ -262,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_perception_parser.add_argument("--privacy-mode", choices=("BALANCED", "MAX_QUALITY"), default=None)
     cloud_perception_parser.add_argument("--gpu", choices=("T4", "L4"), default="T4")
     cloud_perception_parser.add_argument("--temporal-backend", choices=("none", "smolvlm2"), default=None)
+    cloud_perception_parser.add_argument(
+        "--temporal-source", dest="temporal_sources", action="append", default=[],
+        metavar="PROJECT_RELATIVE_SOURCE",
+        help="shortlisted source whose derived 720p proxy may be sent for temporal analysis; repeat for each source",
+    )
     cloud_perception_parser.add_argument("--allow-upload", action="store_true")
     cloud_perception_parser.set_defaults(func=command_colab_perception_index)
 

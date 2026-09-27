@@ -1,110 +1,85 @@
-# Video Factory 混合式架構設計 (Hybrid Video Editing Architecture)
+# Video Factory 本機優先架構
 
-## 一、系統架構概觀
+## 系統分工
 
-本系統將影片製作流程拆分為「導演決策層」、「本機高性能處理層」與「雲端短週期 GPU 運算層」，徹底避免 Mac mini 長時間進行耗電的 GPU 模型推論，同時極大化降低 Google Colab Compute Units (CCU) 的消耗。
+目前的工作路徑以 Mac mini M4 為中心。Antigravity/Gemini 是 editorial director，最終決定故事、片段、節奏與情緒走向；Codex 協調可重跑流程、把導演決策轉成可驗證的計畫並執行本機工具；Claude Opus 可作選擇性深度複核。Mac 執行確定性媒體工作、本機可用的語音推論與最終渲染。Colab adapter 留作未來架構擴充，目前不分配 Colab runtime、不上傳素材。
 
-```
-                    Antigravity/Gemini
-                    Editorial Director
-                       │
-                       │
-                 Video Editing Skill
-                       │
-          ┌────────────┴─────────────┐
-          │                          │
-          ▼                          ▼
-      Mac mini M4                Google Colab
-                                  Cloud worker
-          │                          │
-          │                          ├─ faster-whisper (large-v3-turbo)
-          │                          ├─ GPU inference (CUDA)
-          │                          ├─ speech intelligence (VAD + Whisper)
-          │                          ├─ SigLIP2 visual index / duplicate clusters
-          │                          ├─ shortlist-only temporal backend
-          │                          └─ perception_index.json + automatic release
-          │
-          ├─ ffprobe (metadata, hash cache)
-          ├─ VideoToolbox 720p proxy generation
-          ├─ FFmpeg (scene detection, stills)
-          ├─ audio extraction (FLAC/WAV)
-          ├─ subtitle cleaning & SRT export
-          ├─ final assembly & ducking
-          └─ VideoToolbox H.264/HEVC encoding
-                       │
-                       ▼
-                 final_video.mp4
+```text
+使用者目標與素材
+        │
+        ▼
+Antigravity / Gemini ── 最終故事、片段、節奏與情緒決策
+        │
+        ▼
+Codex ── 導演決策轉成 edit plan、驗證並協調本機執行
+        │
+        ▼
+Mac mini M4
+  ├─ manifest、hash cache、metadata
+  ├─ FFmpeg / VideoToolbox proxies、scene samples、audio extraction
+  ├─ local perception 與支援 Apple Silicon 時的 MLX Whisper transcription
+  ├─ timestamp 對齊、SRT 驗證
+  └─ Remotion render、FFmpeg QA、final encoding
+        │
+        ▼
+本機 outputs/
 ```
 
----
+## 角色
 
-## 二、角色與職責分離
+### Antigravity / Gemini（Editorial Director）
 
-### 1. Antigravity/Gemini（總導演 / Editorial Director）
-- **核心職責**：理解專案目標、理解生活與衛教內容、規劃故事結構、決定剪輯片段、設定情緒節奏與文字卡。
-- **原則**：導演掌握所有的創作與編輯決策；Codex 負責 orchestration、validation 與工具整合，不做無意義的底層轉碼，Colab 也不部署取代導演的大型 LLM。
+- 根據素材資料、使用者目標、profile 與 transcript，決定 `story_plan.json` 中的故事、片段、節奏與情緒走向。
+- 對感知模型提供的候選作最後編輯判斷；embedding 或重要度分數只作線索，不直接等於保留決策。
+- 檢查字幕候選是否有意義。無意義、噪音、幻覺或無法辨識片段不燒錄；疑義內容標記人工確認，不補寫、不猜測。
 
-### 2. Mac mini M4（本機高性能編解碼層）
-- **核心職責**：
-  - 高速讀取原始素材（支援 ProRes、4K H.264/HEVC）。
-  - 利用 Apple VideoToolbox 硬體加速，迅速產出 720p 輕量 proxy。
-  - 本機 FFmpeg 進行快速 CPU 場景切換偵測（Scene Detection）。
-  - 音訊抽取、雙向字幕渲染、配樂自動降音（Audio Ducking）。
-  - 最終成品影片輸出（Apple VideoToolbox H.264/HEVC 加速），保證最高畫質與最高本機效率。
+### Codex
 
-### 3. Google Colab（COLAB PERCEPTION WORKER）
-- **核心職責**：
-  - Speech Intelligence：VAD、faster-whisper `large-v3-turbo`、word timestamps、匿名 ECAPA speaker turns。說話者分群目前是單一音檔內的 utterance heuristic，不處理重疊語音且 confidence 未校準；audio events 與 speech importance 尚未配置。
-  - Visual Semantic Index：從 Mac 的 representative frames 建立 SigLIP2 embeddings、相似度與 duplicate clusters。Live GPU 尚待驗證；routine worker 目前不傳 proxy，也不宣稱從 embedding 直接決定事件或保留片段。
-  - Temporal Deep Analysis：只處理經導演 shortlist 的 derived proxy；目前註冊 SmolVLM2 adapter，backend registry 保留插拔點，live GPU 尚待驗證。
-  - 產生 `work/perception_index.json`（兼容鏡像位於 `outputs/work/perception_index.json`），供導演讀取候選證據。
-  - **預設使用最經濟實惠的 T4 GPU**；L4 只供 MAX_QUALITY shortlist temporal workload，A100/H100/G4 禁止自動使用。
-  - **嚴格執行任務完畢自動釋放**：無論成功或發生異常（finally 區塊），一律確保停止該次分配的 session，絕不留置背景空轉燒點數。
+- 協調可重跑流程、把已決定的剪輯方向落成 `story_plan.json` / `edit_plan.json`，並驗證結構、時間範圍、隱私和 QA 證據。
+- 執行本機 CLI、管理快取與產物；不以 perception 分數自行取代 editorial director 的最終選擇。
 
----
+### Claude Opus（選擇性深度複核）
 
-## 三、三大核心優化策略
+- 只在使用者選擇時複核複雜故事、字幕或 QA 判斷；不是必要執行依賴。
 
-### 1. Proxy-First 工作流程
-- 原始素材（如 4K 60fps 數十 GB 檔案）絕對不直接上傳雲端。
-- 第一時間在 Mac 本機製作 720p 低碼率 proxy。
-- 所有的場景辨識、影格取樣、接觸表（Contact Sheet）與語音辨識均從 Proxy 或抽取音訊出發。
-- 僅在最後的「Render」階段，才由本機合成器讀取原始無損素材進行高品質輸出。
+### Mac mini M4
 
-### 2. Pipeline 狀態機與斷點續跑（Resume Machine）
-系統將流程劃分為 12 個明確且具快取的階段：
-1. `ingest`：素材盤點與 SHA-256 快取。
-2. `proxy`：720p VideoToolbox proxy 製作。
-3. `scenes`：本機場景切換邊界偵測。
-4. `audio`：純音訊無損擷取。
-5. `transcription`：Whisper GPU 轉錄（快取命中時免跑）。
-6. `contact_sheets`：5x5 代表影格接觸表建立。
-7. `perception`：整合 speech、visual semantic、duplicate/event clusters 與 temporal candidate evidence。
-8. `editorial_analysis`：故事弧線與素材評分。
-9. `edit_plan`：產生 `edit_plan.json` 與人類可讀 `edit_summary.md`。
-10. `validate`：嚴格驗證時間軸、素材路徑與衛教引用。
-11. `render`：Mac 本機 Remotion / VideoToolbox 渲染。
-12. `qa`：黑畫面、音量電平與技術指標自動 QA。
+- 原始照片與影片留在本機；所有衍生物存於 project `work/` 或 `outputs/`。
+- 執行檔案雜湊、metadata、proxy、scene sampling、representative frames、音訊擷取等確定性工作。
+- 在已配置且相容的 Apple Silicon 環境以 MLX Whisper 執行本機轉錄。本專案已在一台 M4 上對少量真實保留音訊完成 live inference；這只證明該環境與快取模型可執行，不是通用效能或辨識品質 benchmark。可指定既有模型 revision，並以 `--local-only` 禁止下載。
+- 依 edit plan 做 Remotion 合成、字幕、配樂 ducking、FFmpeg/VideoToolbox 輸出與技術 QA。
 
-所有進度存入 `work/pipeline_state.json`。Render 前的 `REVIEW` gate 會真正停下來，不會自動確認；使用者確認後以 `--approve-review` 或 GUI application API 繼續。中途若在任何步驟中斷或調整，重新執行時自動略過已完成項目。
+### Colab（可選、目前 deferred）
 
-### 3. 人機協同審核閘門（Human Review Gate）
-提供 `AUTO`、`REVIEW`（預設）、`MANUAL` 三種閘門模式：
-- 在 Render 之前自動生成繁體中文 `edit_summary.md`，列出預計片長、採用素材、刪除素材、故事開場/重點/結尾、字幕與需注意項目。
-- 讓人類創作者在最終耗時輸出前有明確的視覺依據進行把關。
+- 程式庫仍保留未來 perception worker 的設計位置，供 CUDA 工作日後評估。
+- 目前 Codex 工作階段無法可靠刷新 Colab MCP 動態新增的 notebook tools，因此 Colab MCP 不納入可執行路徑。不要因此改用 GUI/另一個 agent 來繞過本專案目前的決定。
+- 本專案尚未完成可引用的 live Colab model inference、GPU/Compute Units benchmark 或素材品質比較；SigLIP2、diarization 與 temporal adapters 不代表已跑過真實 Colab job。
+- 未來重新啟用需重新驗證工具 refresh、資料最小化與逐次明確授權；原始 4K 和整個素材庫不得上傳。
 
-### 4. Perception 與導演決策的邊界
+## 字幕工作流程
 
-`perception_index.json` 是證據資料，不是剪輯決策。它保存 transcript、speech turns、匿名 speaker、audio events、scene metadata、embedding reference、duplicate cluster、temporal result、confidence 與 editorial candidate signals；`keep_decision` 一律由 Antigravity/Gemini 或人工導演填入。Claude Opus 僅在需要時做選定片段的深度 review。
+字幕在剪輯決策之後產生，讓轉錄時間能對齊最後保留的內容：
 
-### 5. 隱私與資料最小化
+1. 檢查 edit plan 保留且有現場音的片段。
+2. 若檢出語音，使用本機 ASR 產生帶時間戳的字幕候選；不自動改送雲端服務。
+3. 將來源時間戳按 source in/out 映射至最終時間軸，切分長句並避免 cue 重疊。
+4. 指定導演模型或人工檢查內容是否有語意價值；Codex 記錄 keep/drop。被判定無意義的段落不放字幕；保留原始 transcript 證據，讓排除可追溯。低信心或不確定內容標為 review，不臆測。
+5. 驗證 SRT 時間範圍、排序、重疊與輸出長度，再由 Mac renderer 燒錄。
 
-- `LOCAL_ONLY`：音訊、影格、影片均不上傳。
-- `BALANCED`（預設）：可上傳抽取音訊、代表影格與 360p/480p derived proxy；原始 4K 永不上傳。
-- `MAX_QUALITY`：只有 shortlist 後的少數片段可產生 720p proxy 供 temporal backend 使用。
-- 每次 Colab 工作都是 allocate → run → download → verify → release；失敗路徑也必須 release。
-- 所有 perception cache 都以 source hash + model/version + parameters 建 key，Family short/standard/full 共用。
+字幕語意審閱不得改寫說話者原意。衛教影片字幕中的醫療主張必須回指使用者提供的內容或 references；找不到來源時標記待確認。
 
-### 6. Application / GUI boundary
+## 隱私、快取與重跑
 
-GUI 使用 `video_editor.application.VideoFactoryApplication` 與結構化 progress events，不解析 stdout。未來 Tauri 2 shell 只負責資料夾選擇、profile、duration、privacy、music 與 review；素材仍留在原位置，Mac processing layer 負責 deterministic media work。
+- 預設保持本機處理；`LOCAL_ONLY` 禁止任何資料上傳。其他隱私模式目前不會自動啟動 Colab。
+- 不修改、移動或覆寫 `assets/` 來源檔；衍生檔只寫入 `work/` 或 `outputs/`。
+- 可快取的結果以 source hash、model/version 與 parameters 區分。素材沒有改變時避免重做昂貴推論。
+- `perception_index.json` 是觀察證據，不是剪輯 plan；尚未配置的欄位明確標成 `pending` / `not_configured`。
+- CLI/application API 負責確定性處理和結構化進度；GUI 不解析 CLI stdout，也不以滑鼠操作 timeline。
+
+## 狀態與限制
+
+- 確定性本機媒體流程與 Remotion renderer 可獨立驗證；合成 smoke test 不代表真實家庭素材的故事、裁切或字幕視覺已通過 QA。
+- MLX Whisper adapter 已完成一次有限的 M4 live inference；其他主機、模型與長片效能仍需各自驗證。每次產生的字幕候選仍要語意審閱；mock tests 不能代替真實執行。
+- Colab SigLIP2、匿名 diarization、temporal analysis 尚無本專案 live GPU/Compute Units benchmark。
+- 有音訊不一定有值得呈現的語音；需經語音辨識與語意檢查後再決定字幕。沒有 meaningful cue 時可以不燒錄字幕。
+- 只有播放並檢視成品後才可宣稱視覺與聽覺 QA 完成。

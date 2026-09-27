@@ -137,7 +137,20 @@ class WikimediaCommonsProvider(WikimediaProvider):
 class MusicRequirementAnalyzer:
     def analyze(self, plan: dict[str, Any], policy: ProductPolicy) -> list[MusicRequirement]:
         requirements: list[MusicRequirement] = []
-        for index, segment in enumerate(plan.get("timeline", [])):
+        timeline = plan.get("timeline", [])
+        plan_duration = _number(plan.get("duration_seconds"), 0.0)
+        if plan_duration > 0 and any(
+            isinstance(segment, dict)
+            and segment.get("type") == "music"
+            and _number(segment.get("timeline_start"), 0.0) <= 0
+            and _number(segment.get("timeline_end"), 0.0) >= plan_duration
+            for segment in timeline
+        ):
+            # A full-length track already covers every otherwise-silent slot.
+            # Do not create redundant auto-discovery requirements.
+            return requirements
+
+        for index, segment in enumerate(timeline):
             if not isinstance(segment, dict) or segment.get("type") not in {"video", "photo"}:
                 continue
             start = _number(segment.get("timeline_start"), 0.0)
@@ -386,6 +399,72 @@ class MusicAttributionGenerator:
             (directory / "PUBLISHING_CREDITS.txt").write_text(publishing_text, encoding="utf-8")
         return payload
 
+    def mirror_existing(self, project: Path, payload: dict[str, Any], planned_music: list[dict[str, Any]]) -> None:
+        """Validate and mirror a manually selected track receipt without replacing its evidence."""
+        if payload.get("schema_version") != "music-attribution.v1" or not isinstance(payload.get("tracks"), list):
+            raise ValueError("The edit plan contains music but its attribution receipt is invalid.")
+        tracks = [item for item in payload["tracks"] if isinstance(item, dict)]
+        by_id = {str(item.get("id")): item for item in tracks if item.get("id")}
+        selected: list[dict[str, Any]] = []
+        for segment in planned_music:
+            segment_id = str(segment.get("id") or "")
+            item = by_id.get(segment_id)
+            if item is None:
+                raise ValueError(f"The selected music segment {segment_id!r} has no matching attribution receipt.")
+            local_asset = item.get("local_asset")
+            if not isinstance(local_asset, str) or local_asset != segment.get("source") or not _safe_relative(project, local_asset):
+                raise ValueError(f"The attribution receipt does not match the project-local source for {segment_id!r}.")
+            asset = (project / local_asset).resolve(strict=True)
+            if not asset.is_file():
+                raise ValueError(f"The selected music source is missing for {segment_id!r}.")
+            digest = hashlib.sha256()
+            with asset.open("rb") as source_file:
+                for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if item.get("sha256") != digest.hexdigest():
+                raise ValueError(f"The selected music source hash does not match its attribution receipt for {segment_id!r}.")
+            selected.append(item)
+
+        work = project / "work"
+        outputs = project / "outputs"
+        outputs_work = outputs / "work"
+        outputs_final = outputs / "final"
+        licenses = outputs_work / "music" / "licenses"
+        for directory in (work, outputs_work, outputs_final, licenses):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        (work / "music_attribution.json").write_text(serialized, encoding="utf-8")
+        (outputs_work / "music_attribution.json").write_text(serialized, encoding="utf-8")
+        (outputs_final / "music_attribution.json").write_text(serialized, encoding="utf-8")
+
+        manifest = {"schema_version": "music-manifest.v1", "tracks": []}
+        credits = ["# MUSIC_CREDITS", ""]
+        publishing = ["# PUBLISHING_CREDITS", ""]
+        for item in selected:
+            track_id = str(item["id"])
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", track_id):
+                raise ValueError("A selected music track has an invalid attribution ID.")
+            evidence = {
+                key: item.get(key)
+                for key in (
+                    "id", "title", "creator", "provider", "license", "license_url", "source_url",
+                    "download_url", "sha256", "source_page_evidence", "attribution_text",
+                )
+            }
+            (licenses / f"{track_id}.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            manifest["tracks"].append({"id": track_id, "title": item.get("title"), "provider": item.get("provider"), "license": item.get("license")})
+            line = str(item.get("attribution_text") or f"{item.get('title', track_id)} — {item.get('license', 'license review required')} — {item.get('source_url', '')}")
+            credits.append(f"- {line}")
+            publishing.append(f"- {line}")
+
+        (outputs_work / "music" / "music_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        credits_text = "\n".join(credits) + "\n"
+        publishing_text = "\n".join(publishing) + "\n"
+        for directory in (outputs, outputs_final):
+            (directory / "MUSIC_CREDITS.txt").write_text(credits_text, encoding="utf-8")
+            (directory / "PUBLISHING_CREDITS.txt").write_text(publishing_text, encoding="utf-8")
+
 
 def _number(value: Any, default: float) -> float:
     try:
@@ -397,7 +476,18 @@ def _number(value: Any, default: float) -> float:
 def prepare_music_artifacts(project: Path, policy: ProductPolicy, plan: dict[str, Any]) -> dict[str, Any]:
     analyzer = MusicRequirementAnalyzer()
     requirements = analyzer.analyze(plan, policy)
-    status = "disabled" if policy.music_mode == "none" else ("no_music_required" if not requirements else "pending_discovery")
+    planned_music = [
+        segment for segment in plan.get("timeline", [])
+        if isinstance(segment, dict) and segment.get("type") == "music"
+    ]
+    if policy.music_mode == "none":
+        status = "disabled"
+    elif planned_music and not requirements:
+        status = "selected_in_edit_plan"
+    elif planned_music:
+        status = "selected_in_edit_plan_with_uncovered_requirements"
+    else:
+        status = "no_music_required" if not requirements else "pending_discovery"
     payload = {
         "schema_version": "music-requirements.v1",
         "mode": policy.music_mode,
@@ -416,7 +506,17 @@ def prepare_music_artifacts(project: Path, policy: ProductPolicy, plan: dict[str
     outputs_work = project / "outputs" / "work"
     outputs_work.mkdir(parents=True, exist_ok=True)
     (outputs_work / "music_requirements.json").write_text(serialized, encoding="utf-8")
-    MusicAttributionGenerator().write(project, (), ())
+    if planned_music:
+        receipt_path = work / "music_attribution.json"
+        if not receipt_path.is_file():
+            raise ValueError("The edit plan contains music but no work/music_attribution.json receipt exists.")
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("The edit plan contains music but its attribution receipt is not valid JSON.") from exc
+        MusicAttributionGenerator().mirror_existing(project, receipt, planned_music)
+    else:
+        MusicAttributionGenerator().write(project, (), ())
     return payload
 
 

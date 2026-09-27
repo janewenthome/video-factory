@@ -29,9 +29,16 @@ from colab_transcription import (
     _run_colab,
 )
 from perception import (
+    AUDIO_EVENT_METHOD,
+    AUDIO_EVENT_MODEL,
+    AUDIO_EVENT_MODEL_REVISION,
+    AUDIO_EVENT_TOP_K,
+    AUDIO_EVENT_WINDOW_SECONDS,
     COLAB_PACKAGE_VERSIONS,
     DIARIZATION_MODEL,
     DIARIZATION_MODEL_REVISION,
+    IMPORTANCE_METHOD,
+    IMPORTANCE_PARAMETERS,
     SPEECH_ENGINE_VERSION,
     SPEECH_MODEL,
     SPEECH_MODEL_REPO,
@@ -74,6 +81,60 @@ def _runtime_packages(stage: str) -> dict[str, str]:
     return {name: version for name, version in COLAB_PACKAGE_VERSIONS.items() if name in names}
 
 
+def _safe_diagnostic(value: Any) -> str:
+    """Keep remote error detail useful while excluding credentials and paths."""
+    if not isinstance(value, str):
+        return ""
+    message = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+    message = re.sub(r"(?i)\b(hf_[A-Za-z0-9]{8,}|AIza[A-Za-z0-9_-]{20,})\b", "[redacted-token]", message)
+    message = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]", message)
+    message = re.sub(
+        r"(?i)\b(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*[^\s,;]+",
+        r"\1=[redacted]", message,
+    )
+    message = re.sub(r"https?://[^\s)]+", "[redacted-url]", message)
+    message = re.sub(r"(?<!\w)/(?:content|tmp|root|usr|opt|home|workspace)/[^\s,;]+", "[remote-path]", message)
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    return " | ".join(lines[-6:])[:1000]
+
+
+def _speech_importance_record(source: str, segment: dict[str, Any], rms_dbfs: float) -> dict[str, Any]:
+    """Create transparent, uncalibrated acoustic/transcript candidate signals."""
+    start = float(segment["start"])
+    end = float(segment["end"])
+    duration = max(0.0, end - start)
+    words = segment.get("words")
+    word_count = (
+        sum(1 for word in words if isinstance(word, dict) and isinstance(word.get("word"), str) and word["word"].strip())
+        if isinstance(words, list) and words
+        else len(re.findall(r"\w+", str(segment.get("text", "")), flags=re.UNICODE))
+    )
+    word_signal = min(word_count / float(IMPORTANCE_PARAMETERS["word_count_scale"]), 1.0)
+    duration_signal = min(duration / float(IMPORTANCE_PARAMETERS["duration_seconds_scale"]), 1.0)
+    energy_floor = float(IMPORTANCE_PARAMETERS["rms_dbfs_floor"])
+    energy_ceiling = float(IMPORTANCE_PARAMETERS["rms_dbfs_ceiling"])
+    energy_signal = max(0.0, min(1.0, (float(rms_dbfs) - energy_floor) / (energy_ceiling - energy_floor)))
+    weights = IMPORTANCE_PARAMETERS["weights"]
+    return {
+        "source": source, "start": start, "end": end,
+        "score": round(
+            float(weights["words"]) * word_signal
+            + float(weights["duration"]) * duration_signal
+            + float(weights["energy"]) * energy_signal,
+            4,
+        ),
+        "method": IMPORTANCE_METHOD, "confidence": None,
+        "signals": {
+            "word_count": word_count, "duration_seconds": round(duration, 3),
+            "words_per_second": round(word_count / duration, 3) if duration > 0 else 0.0,
+            "rms_dbfs": round(float(rms_dbfs), 2),
+            "word_signal": round(word_signal, 4),
+            "duration_signal": round(duration_signal, 4),
+            "energy_signal": round(energy_signal, 4),
+        },
+    }
+
+
 def _worker_source(configuration: dict[str, Any]) -> str:
     """Create a self-contained Colab script with pinned packages and models."""
     import inspect
@@ -81,16 +142,20 @@ def _worker_source(configuration: dict[str, Any]) -> str:
     config_literal = repr(json.dumps(configuration, ensure_ascii=False, separators=(",", ":")))
     package_literal = repr(configuration.get("packages", COLAB_PACKAGE_VERSIONS))
     assignment_source = inspect.getsource(assign_anonymous_speakers)
+    importance_source = inspect.getsource(_speech_importance_record)
     inference = r'''import hashlib, importlib.metadata, json, math, os, re, sys, time, zipfile
 from pathlib import Path
 from typing import Any
 
 __ASSIGNMENT_HELPER__
+__IMPORTANCE_HELPER__
 
 import numpy as np
 import torch
 
 CONFIG = json.loads(__CONFIG__)
+IMPORTANCE_METHOD = CONFIG["importance_method"]
+IMPORTANCE_PARAMETERS = CONFIG["importance_parameters"]
 EXPECTED_PACKAGES = __PACKAGES__
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA is unavailable in the allocated Colab runtime.")
@@ -153,6 +218,66 @@ def sha256_file(path):
 def extract_word(word):
     return {"start": float(word.start), "end": float(word.end), "word": word.word}
 
+def classify_audio_events(audio_entries):
+    from huggingface_hub import snapshot_download
+    from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+    import soundfile as sf
+    import torchaudio
+
+    model_dir = snapshot_download(
+        repo_id=CONFIG["audio_event_model"], revision=CONFIG["audio_event_model_revision"],
+    )
+    feature_extractor = AutoFeatureExtractor.from_pretrained(model_dir)
+    model = AutoModelForAudioClassification.from_pretrained(
+        model_dir, torch_dtype=torch.float16,
+    ).to("cuda").eval()
+    sample_rate = int(feature_extractor.sampling_rate)
+    window_samples = CONFIG["audio_event_window_seconds"] * sample_rate
+    output = []
+    for audio in audio_entries:
+        audio_path = safe_path(audio["path"])
+        samples, original_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(samples.mean(axis=1).copy())
+        if original_rate != sample_rate:
+            waveform = torchaudio.functional.resample(waveform, original_rate, sample_rate)
+        for start_sample in range(0, waveform.numel(), window_samples):
+            end_sample = min(waveform.numel(), start_sample + window_samples)
+            chunk = waveform[start_sample:end_sample].numpy()
+            if chunk.size == 0:
+                continue
+            inputs = feature_extractor(
+                chunk, sampling_rate=sample_rate, return_tensors="pt",
+            )
+            inputs = {key: value.to("cuda") for key, value in inputs.items()}
+            if "input_values" in inputs:
+                inputs["input_values"] = inputs["input_values"].to(dtype=next(model.parameters()).dtype)
+            with torch.inference_mode():
+                scores = torch.sigmoid(model(**inputs).logits.float()).flatten()
+            values, label_indices = torch.topk(
+                scores, k=min(CONFIG["audio_event_top_k"], scores.numel()),
+            )
+            for score, label_index in zip(values.tolist(), label_indices.tolist()):
+                output.append({
+                    "source": audio["source"],
+                    "start_seconds": round(start_sample / sample_rate, 3),
+                    "end_seconds": round(end_sample / sample_rate, 3),
+                    "label": str(model.config.id2label[int(label_index)]),
+                    "score": float(score), "method": CONFIG["audio_event_method"],
+                    "confidence": None,
+                })
+    metadata = {
+        "name": CONFIG["audio_event_model"],
+        "revision": CONFIG["audio_event_model_revision"],
+        "engine": f"transformers-{importlib.metadata.version('transformers')}",
+        "status": "completed", "method": CONFIG["audio_event_method"],
+        "sampling_rate": sample_rate,
+        "window_seconds": CONFIG["audio_event_window_seconds"],
+        "top_k": CONFIG["audio_event_top_k"], "score_calibrated": False,
+    }
+    del model, feature_extractor
+    torch.cuda.empty_cache()
+    return output, metadata
+
 runtime = {
     "gpu_name": GPU_NAME,
     "python": sys.version.split()[0],
@@ -162,9 +287,11 @@ runtime = {
 models = {}
 speech = {
     "transcripts": [], "speech_turns": [], "anonymous_speakers": [],
-    "audio_events": [], "audio_events_status": "not_configured",
-    "importance": [], "importance_status": "not_configured",
-    "importance_method": None, "importance_confidence_calibrated": False,
+    "audio_events": [], "audio_events_status": "not_applicable",
+    "audio_events_method": CONFIG["audio_event_method"],
+    "audio_events_confidence_calibrated": False,
+    "importance": [], "importance_status": "not_applicable",
+    "importance_method": IMPORTANCE_METHOD, "importance_confidence_calibrated": False,
     "vad": "faster-whisper-vad_filter", "status": "not_applicable",
     "diarization_status": "not_applicable",
     "diarization_method": "speechbrain-ecapa-utterance-clustering.v1",
@@ -323,6 +450,7 @@ if CONFIG["stage"] == "perception":
                 })
             speech["transcripts"].append({
                 "source": audio["source"], "source_sha256": audio["sha256"],
+                "duration_seconds": float(getattr(info, "duration", 0.0)),
                 "language": getattr(info, "language", None), "segments": segment_values,
                 "model": CONFIG["speech_model"],
                 "model_repo": CONFIG["speech_model_repo"],
@@ -341,6 +469,14 @@ if CONFIG["stage"] == "perception":
         for audio, transcript in zip(audio_entries, speech["transcripts"]):
             audio_path = safe_path(audio["path"])
             samples, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+            mono_samples = samples.mean(axis=1)
+            for segment in transcript["segments"]:
+                left = max(0, int(float(segment["start"]) * sample_rate))
+                right = min(len(mono_samples), int(float(segment["end"]) * sample_rate))
+                clip = mono_samples[left:right]
+                rms = float(np.sqrt(np.mean(np.square(clip, dtype=np.float64)))) if clip.size else 0.0
+                rms_dbfs = 20.0 * math.log10(max(rms, 1e-6))
+                speech["importance"].append(_speech_importance_record(audio["source"], segment, rms_dbfs))
             mono = torch.from_numpy(samples.mean(axis=1).copy())
             if sample_rate != 16000:
                 mono = torchaudio.functional.resample(mono, sample_rate, 16000)
@@ -368,6 +504,18 @@ if CONFIG["stage"] == "perception":
             } for speaker in speakers)
         del diarizer
         torch.cuda.empty_cache()
+        speech["importance_status"] = "completed"
+        speech["importance_method"] = IMPORTANCE_METHOD
+        models["speech_importance"] = {
+            "method": IMPORTANCE_METHOD,
+            "parameters": CONFIG["importance_parameters"],
+            "status": "completed", "confidence_calibrated": False,
+            "interpretation": "uncalibrated_candidate_signal_not_semantic_importance",
+        }
+        speech["audio_events"], models["audio_events"] = classify_audio_events(audio_entries)
+        speech["audio_events_status"] = "completed"
+        speech["audio_events_method"] = CONFIG["audio_event_method"]
+        speech["audio_events_confidence_calibrated"] = False
         speech["status"] = "completed"
         speech["diarization_status"] = "completed"
         models["speech"] = {
@@ -506,22 +654,65 @@ temporary_path.write_text(json.dumps(result, ensure_ascii=False, allow_nan=False
 os.replace(temporary_path, output_path)
 '''
     inference = inference.replace("__ASSIGNMENT_HELPER__", assignment_source)
+    inference = inference.replace("__IMPORTANCE_HELPER__", importance_source)
     inference = inference.replace("__CONFIG__", config_literal).replace("__PACKAGES__", package_literal)
-    source = r'''import importlib.util, json, os, subprocess, sys
+    source = r'''import importlib.util, json, os, re, subprocess, sys
+from typing import Any
 
 CONFIG = json.loads(__CONFIG__)
 PACKAGES = __PACKAGES__
-hardware = subprocess.run(
+__SAFE_DIAGNOSTIC_HELPER__
+
+def _run_checked(command, *, phase, timeout, env=None):
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=False,
+            timeout=timeout, env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        detail = _safe_diagnostic(exc.stderr or "")
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"{phase} timed out{suffix}") from None
+    if result.returncode:
+        detail = _safe_diagnostic(result.stderr or "")
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"{phase} exited with code {result.returncode}{suffix}")
+    return result
+
+def _write_failure(error, phase):
+    try:
+        payload = {
+            "schema_version": "perception-index.v1",
+            "worker_version": CONFIG.get("worker_version"),
+            "stage": CONFIG.get("stage"), "status": "failed",
+            "diagnostic": {
+                "phase": str(phase)[:80], "error_type": type(error).__name__[:80],
+                "message": _safe_diagnostic(str(error)),
+            },
+        }
+        output_path = CONFIG.get("output_path")
+        temporary_path = output_path + ".tmp"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, allow_nan=False)
+        os.replace(temporary_path, output_path)
+    except Exception:
+        # Do not print worker context or fall back to a success-shaped result.
+        pass
+
+phase = "gpu_probe"
+hardware = _run_checked(
     ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-    capture_output=True, text=True, check=True, timeout=30,
+    phase=phase, timeout=30,
 ).stdout.strip().splitlines()
 if len(hardware) != 1 or CONFIG["gpu"] not in hardware[0].split():
     raise RuntimeError("Allocated GPU differs from the requested GPU; perception was not started.")
-subprocess.run(
+phase = "package_install"
+_run_checked(
     [sys.executable, "-m", "pip", "install", "--quiet", *[f"{name}=={version}" for name, version in PACKAGES.items()]],
-    check=True, timeout=1800, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    phase=phase, timeout=1800,
 )
 importlib.invalidate_caches()
+phase = "cuda_library_setup"
 library_dirs = []
 for module in ("nvidia.cublas.lib", "nvidia.cudnn.lib"):
     spec = importlib.util.find_spec(module)
@@ -531,15 +722,25 @@ for module in ("nvidia.cublas.lib", "nvidia.cudnn.lib"):
 environment = os.environ.copy()
 environment["LD_LIBRARY_PATH"] = os.pathsep.join(library_dirs + [environment.get("LD_LIBRARY_PATH", "")])
 inference_source = __INFERENCE__
-subprocess.run(
+phase = f"{CONFIG['stage']}_inference"
+_run_checked(
     [sys.executable, "-c", inference_source], env=environment,
-    check=True, timeout=__TIMEOUT__,
+    phase=phase, timeout=__TIMEOUT__,
 )
 '''
+    safe_diagnostic_source = inspect.getsource(_safe_diagnostic)
+    source = source.replace("__SAFE_DIAGNOSTIC_HELPER__", safe_diagnostic_source)
     source = source.replace("__CONFIG__", config_literal)
     source = source.replace("__PACKAGES__", package_literal)
     source = source.replace("__INFERENCE__", repr(inference))
     source = source.replace("__TIMEOUT__", str(configuration.get("timeout_seconds", 10_000)))
+    import textwrap
+    runtime_start = source.index("phase = \"gpu_probe\"")
+    prefix, runtime = source[:runtime_start], source[runtime_start:]
+    source = (
+        prefix + "try:\n" + textwrap.indent(textwrap.dedent(runtime), "    ")
+        + "\nexcept Exception as exc:\n    _write_failure(exc, phase)\n"
+    )
     return source
 
 
@@ -813,8 +1014,21 @@ def _validate_remote_result(
         remote.get("schema_version") != "perception-index.v1"
         or remote.get("worker_version") != WORKER_VERSION
         or remote.get("stage") != stage
-        or remote.get("status") != "completed"
     ):
+        raise UserFacingError("Colab perception worker did not report the expected completed stage/version.")
+    if remote.get("status") != "completed":
+        if remote.get("status") == "failed":
+            diagnostic = remote.get("diagnostic")
+            if isinstance(diagnostic, dict):
+                phase = diagnostic.get("phase")
+                error_type = diagnostic.get("error_type")
+                message = _safe_diagnostic(diagnostic.get("message"))
+                if not isinstance(phase, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,79}", phase):
+                    phase = "remote_worker"
+                if not isinstance(error_type, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]{0,79}", error_type):
+                    error_type = "RemoteError"
+                suffix = f": {message}" if message else ""
+                raise UserFacingError(f"Colab {stage} worker failed during {phase} ({error_type}){suffix}.")
         raise UserFacingError("Colab perception worker did not report the expected completed stage/version.")
     privacy = remote.get("privacy")
     if not isinstance(privacy, dict) or privacy.get("mode") != base.get("privacy", {}).get("mode") or privacy.get("original_media_uploaded") is not False:
@@ -850,14 +1064,24 @@ def _validate_remote_result(
             raise UserFacingError("Colab perception output omitted speech or visual results.")
         if speech.get("vad") != "faster-whisper-vad_filter":
             raise UserFacingError("Speech output did not confirm the configured VAD stage.")
-        if speech.get("audio_events") != [] or speech.get("audio_events_status") != "not_configured":
-            raise UserFacingError("Audio event detection is not configured and must not be marked completed.")
+        audio_events = speech.get("audio_events")
+        importance = speech.get("importance")
+        if not isinstance(audio_events, list) or not isinstance(importance, list):
+            raise UserFacingError("Speech event and importance outputs must be arrays.")
+        expected_auxiliary_status = "completed" if expected_audio else "not_applicable"
+        if speech.get("audio_events_status") != expected_auxiliary_status:
+            raise UserFacingError("Audio event candidates did not complete for the uploaded audio workload.")
+        if speech.get("importance_status") != expected_auxiliary_status:
+            raise UserFacingError("Speech importance metadata did not complete for the uploaded audio workload.")
         if (
-            speech.get("importance") != [] or speech.get("importance_status") != "not_configured"
-            or speech.get("importance_method") is not None
+            speech.get("importance_method") != IMPORTANCE_METHOD
             or speech.get("importance_confidence_calibrated") is not False
+            or speech.get("audio_events_method") != AUDIO_EVENT_METHOD
+            or speech.get("audio_events_confidence_calibrated") is not False
         ):
-            raise UserFacingError("Speech importance must remain explicitly unconfigured until a validated model exists.")
+            raise UserFacingError("Speech candidate methods must be explicitly identified as uncalibrated heuristics.")
+        if not expected_audio and (audio_events or importance):
+            raise UserFacingError("Speech candidates were returned without an uploaded audio source.")
         if speech.get("status") != ("completed" if expected_audio else "not_applicable"):
             raise UserFacingError("Speech stage status does not match the uploaded audio workload.")
         if speech.get("diarization_status") != ("completed" if expected_audio else "not_applicable"):
@@ -869,11 +1093,16 @@ def _validate_remote_result(
             raise UserFacingError("Transcription results do not cover the exact uploaded audio source set.")
         if len(transcripts) != len(expected_audio):
             raise UserFacingError("Transcription results contain duplicate source records.")
-        transcript_segments: dict[tuple[str, str, str], str] = {}
+        transcript_segments: dict[tuple[str, str, str], dict[str, Any]] = {}
+        source_durations: dict[str, float] = {}
         for transcript in transcripts:
             source = transcript["source"]
             if transcript.get("source_sha256") != expected_audio[source] or transcript.get("model") != SPEECH_MODEL or transcript.get("model_repo") != SPEECH_MODEL_REPO or transcript.get("model_revision") != SPEECH_MODEL_REVISION:
                 raise UserFacingError(f"Transcript source/model fingerprint mismatch for {source!r}.")
+            duration = transcript.get("duration_seconds")
+            if not _finite_number(duration) or float(duration) <= 0:
+                raise UserFacingError(f"Transcript omitted a valid audio duration for {source!r}.")
+            source_durations[source] = float(duration)
             segments = transcript.get("segments")
             if not isinstance(segments, list):
                 raise UserFacingError(f"Transcript segments are invalid for {source!r}.")
@@ -895,7 +1124,7 @@ def _validate_remote_result(
                         or not isinstance(word.get("word"), str)
                     ):
                         raise UserFacingError(f"Word timestamps are invalid for {source!r}.")
-                transcript_segments[(source, str(segment["start"]), str(segment["end"]))] = segment["text"]
+                transcript_segments[(source, str(segment["start"]), str(segment["end"]))] = segment
         turns = speech.get("speech_turns")
         if not isinstance(turns, list) or len(turns) != sum(len(item["segments"]) for item in transcripts):
             raise UserFacingError("Diarization did not return one anonymous turn per transcript segment.")
@@ -909,7 +1138,7 @@ def _validate_remote_result(
             if identity not in transcript_segments or identity in seen_turns:
                 raise UserFacingError("Diarization turns do not map one-to-one to transcript segments.")
             seen_turns.add(identity)
-            if turn.get("text") != transcript_segments[identity]:
+            if turn.get("text") != transcript_segments[identity]["text"]:
                 raise UserFacingError("Diarization turn text differs from its timestamped transcript segment.")
             speaker = turn.get("speaker_id")
             if speaker != "unknown" and not re.fullmatch(r"speaker_[0-9]{2}", str(speaker)):
@@ -936,6 +1165,75 @@ def _validate_remote_result(
                 or expected_diarization_model.get("confidence_calibrated") is not False
             ):
                 raise UserFacingError("Pinned SpeechBrain ECAPA diarization did not complete successfully.")
+            importance_model = models.get("speech_importance", {})
+            if (
+                not isinstance(importance_model, dict)
+                or importance_model.get("method") != IMPORTANCE_METHOD
+                or importance_model.get("parameters") != IMPORTANCE_PARAMETERS
+                or importance_model.get("status") != "completed"
+                or importance_model.get("confidence_calibrated") is not False
+                or importance_model.get("interpretation") != "uncalibrated_candidate_signal_not_semantic_importance"
+            ):
+                raise UserFacingError("Speech importance method/parameters must be explicitly pinned and uncalibrated.")
+            expected_importance_ids = set(transcript_segments)
+            seen_importance_ids = set()
+            if len(importance) != len(expected_importance_ids):
+                raise UserFacingError("Speech importance metadata does not cover each transcript segment exactly once.")
+            for item in importance:
+                if not isinstance(item, dict):
+                    raise UserFacingError("Speech importance metadata contains an invalid record.")
+                identity = (item.get("source"), str(item.get("start")), str(item.get("end")))
+                if identity not in expected_importance_ids or identity in seen_importance_ids:
+                    raise UserFacingError("Speech importance metadata does not map one-to-one to transcript segments.")
+                seen_importance_ids.add(identity)
+                signals = item.get("signals")
+                if (
+                    item.get("method") != IMPORTANCE_METHOD or item.get("confidence") is not None
+                    or not _finite_number(item.get("score")) or not 0.0 <= float(item["score"]) <= 1.0
+                    or not isinstance(signals, dict) or not _finite_number(signals.get("rms_dbfs"))
+                ):
+                    raise UserFacingError("Speech importance must remain a non-calibrated, explainable heuristic.")
+                expected_item = _speech_importance_record(
+                    identity[0], transcript_segments[identity], float(signals["rms_dbfs"]),
+                )
+                if item != expected_item:
+                    raise UserFacingError("Speech importance score and exposed signals do not match the pinned heuristic.")
+
+            event_model = models.get("audio_events", {})
+            if (
+                not isinstance(event_model, dict)
+                or event_model.get("name") != AUDIO_EVENT_MODEL
+                or event_model.get("revision") != AUDIO_EVENT_MODEL_REVISION
+                or event_model.get("status") != "completed"
+                or event_model.get("method") != AUDIO_EVENT_METHOD
+                or event_model.get("sampling_rate") != 16000
+                or event_model.get("window_seconds") != AUDIO_EVENT_WINDOW_SECONDS
+                or event_model.get("top_k") != AUDIO_EVENT_TOP_K
+                or event_model.get("score_calibrated") is not False
+                or event_model.get("engine") != f"transformers-{COLAB_PACKAGE_VERSIONS['transformers']}"
+            ):
+                raise UserFacingError("Pinned AudioSet event classifier metadata is missing or inconsistent.")
+            event_counts: dict[tuple[str, float], int] = {}
+            for event in audio_events:
+                if not isinstance(event, dict):
+                    raise UserFacingError("Audio event candidates contain an invalid record.")
+                source = event.get("source")
+                start, end = event.get("start_seconds"), event.get("end_seconds")
+                if (
+                    source not in expected_audio or not _finite_number(start) or not _finite_number(end)
+                    or float(start) < 0 or float(end) <= float(start)
+                    or float(end) > source_durations[source] + 0.05
+                    or float(end) - float(start) > AUDIO_EVENT_WINDOW_SECONDS + 0.01
+                    or not math.isclose(float(start) % AUDIO_EVENT_WINDOW_SECONDS, 0.0, abs_tol=0.002)
+                    or not isinstance(event.get("label"), str) or not event["label"].strip()
+                    or event.get("method") != AUDIO_EVENT_METHOD or event.get("confidence") is not None
+                    or not _finite_number(event.get("score")) or not 0 <= float(event["score"]) <= 1
+                ):
+                    raise UserFacingError("Audio event candidate has invalid source, timing, model score, or calibration metadata.")
+                key = (source, float(start))
+                event_counts[key] = event_counts.get(key, 0) + 1
+            if any(count > AUDIO_EVENT_TOP_K for count in event_counts.values()):
+                raise UserFacingError("AudioSet returned more than the configured candidates per time window.")
         frame_items = visual.get("items")
         if not isinstance(frame_items, list) or sorted(item.get("id") for item in frame_items if isinstance(item, dict)) != sorted(expected_frames):
             raise UserFacingError("SigLIP2 results do not cover the exact representative-frame manifest.")
@@ -1014,11 +1312,23 @@ def _perception_cache_complete(project: Path, index: dict[str, Any]) -> bool:
     if expected_audio:
         if speech.get("status") != "completed" or speech.get("diarization_status") != "completed":
             return False
-        if speech.get("audio_events_status") != "not_configured" or speech.get("importance_status") != "not_configured":
+        if (
+            speech.get("audio_events_status") != "completed"
+            or speech.get("audio_events_method") != AUDIO_EVENT_METHOD
+            or speech.get("audio_events_confidence_calibrated") is not False
+            or speech.get("importance_status") != "completed"
+            or speech.get("importance_method") != IMPORTANCE_METHOD
+            or speech.get("importance_confidence_calibrated") is not False
+        ):
             return False
         speech_model = models.get("speech", {})
         diarization_model = models.get("diarization", {})
-        if not isinstance(speech_model, dict) or not isinstance(diarization_model, dict):
+        audio_event_model = models.get("audio_events", {})
+        importance_model = models.get("speech_importance", {})
+        if (
+            not isinstance(speech_model, dict) or not isinstance(diarization_model, dict)
+            or not isinstance(audio_event_model, dict) or not isinstance(importance_model, dict)
+        ):
             return False
         if (
             speech_model.get("name") != SPEECH_MODEL
@@ -1029,6 +1339,14 @@ def _perception_cache_complete(project: Path, index: dict[str, Any]) -> bool:
             or diarization_model.get("name") != DIARIZATION_MODEL
             or diarization_model.get("revision") != DIARIZATION_MODEL_REVISION
             or diarization_model.get("status") != "completed"
+            or audio_event_model.get("name") != AUDIO_EVENT_MODEL
+            or audio_event_model.get("revision") != AUDIO_EVENT_MODEL_REVISION
+            or audio_event_model.get("status") != "completed"
+            or audio_event_model.get("method") != AUDIO_EVENT_METHOD
+            or importance_model.get("method") != IMPORTANCE_METHOD
+            or importance_model.get("parameters") != IMPORTANCE_PARAMETERS
+            or importance_model.get("status") != "completed"
+            or importance_model.get("confidence_calibrated") is not False
         ):
             return False
         if sorted(item.get("source") for item in speech.get("transcripts", []) if isinstance(item, dict)) != sorted(item.get("source") for item in expected_audio):
@@ -1183,6 +1501,13 @@ def _run_remote_stage(
                 "speech_model_repo": SPEECH_MODEL_REPO, "speech_model_revision": SPEECH_MODEL_REVISION,
                 "diarization_model": DIARIZATION_MODEL,
                 "diarization_model_revision": DIARIZATION_MODEL_REVISION,
+                "audio_event_model": AUDIO_EVENT_MODEL,
+                "audio_event_model_revision": AUDIO_EVENT_MODEL_REVISION,
+                "audio_event_method": AUDIO_EVENT_METHOD,
+                "audio_event_window_seconds": AUDIO_EVENT_WINDOW_SECONDS,
+                "audio_event_top_k": AUDIO_EVENT_TOP_K,
+                "importance_method": IMPORTANCE_METHOD,
+                "importance_parameters": IMPORTANCE_PARAMETERS,
                 "visual_model": VISUAL_MODEL, "visual_model_revision": VISUAL_MODEL_REVISION,
                 "visual_engine_version": f"transformers-{COLAB_PACKAGE_VERSIONS['transformers']}",
                 "visual_dimension": EXPECTED_VISUAL_DIMENSION,
@@ -1200,12 +1525,29 @@ def _run_remote_stage(
             _run_colab(cli_path, "new", ["new", "-s", session_name, "--gpu", gpu])
             _run_colab(cli_path, "upload", ["upload", "-s", session_name, str(bundle), remote_bundle])
             _run_colab(cli_path, "upload", ["upload", "-s", session_name, str(worker), remote_worker])
-            _run_colab(cli_path, "exec", ["exec", "-s", session_name, "-f", remote_worker, "--timeout", str(REMOTE_EXEC_TIMEOUT)])
-            _run_colab(cli_path, "download", ["download", "-s", session_name, remote_output, str(download)])
+            exec_error: UserFacingError | None = None
+            try:
+                _run_colab(cli_path, "exec", ["exec", "-s", session_name, "-f", remote_worker, "--timeout", str(REMOTE_EXEC_TIMEOUT)])
+            except UserFacingError as exc:
+                exec_error = exc
+            try:
+                _run_colab(cli_path, "download", ["download", "-s", session_name, remote_output, str(download)])
+            except UserFacingError:
+                if exec_error is not None:
+                    raise exec_error from None
+                raise
             try:
                 remote_index = json.loads(download.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                if exec_error is not None:
+                    raise exec_error from None
                 raise UserFacingError("Colab perception did not provide valid JSON output.") from exc
+            if exec_error is not None and (
+                not isinstance(remote_index, dict) or remote_index.get("status") != "failed"
+            ):
+                raise UserFacingError(
+                    "Colab CLI reported an execution failure and did not provide a verified failure receipt; refusing the result."
+                ) from exec_error
             _validate_remote_result(
                 remote_index, index, stage=stage, manifest=manifest,
                 gpu=gpu, selected_sources=selected_sources,

@@ -1,11 +1,11 @@
-"""Hybrid pipeline orchestrator for Video Factory.
+"""Mac-first pipeline orchestrator for Video Factory.
 
 Handles:
 1. Ingest (manifest, sha256)
 2. Proxy (720p VideoToolbox)
 3. Scenes (FFmpeg / PySceneDetect)
 4. Audio (extraction)
-5. Transcription (faster-whisper on Colab GPU or cached)
+5. Cut-first local transcription (MLX Whisper on Apple Silicon)
 6. Contact Sheets (5x5 tiled stills)
 7. Perception index (speech, visual and temporal evidence contract)
 8. Editorial Analysis (asset scoring & story arc)
@@ -37,7 +37,6 @@ if str(SCRIPTS_DIR) not in sys.path:
 import video_factory
 from edit_summary import generate_edit_summary
 from make_proxy import build_proxies_for_project
-from select_compute import explain_compute_plan, select_compute_for_task
 from perception import build_perception_index
 from video_editor.music import prepare_music_artifacts
 from video_editor.product_policy import duration_summary, load_product_policy
@@ -212,26 +211,14 @@ class PipelineOrchestrator:
         print("  7. Final video assembly & render (Remotion + Apple VideoToolbox)")
         print("  8. Quality Assurance (ffprobe, blackdetect, audio levels)")
 
-        print("\nColab GPU Tasks:")
-        if self.no_gpu or self.policy.privacy_mode == "LOCAL_ONLY":
-            reason = "--no-gpu specified" if self.no_gpu else "LOCAL_ONLY privacy mode"
-            print(f"  - [DISABLED] {reason}. Cloud GPU inference will be skipped.")
-            selected_gpu = "none"
-        else:
-            selected_gpu = select_compute_for_task("transcribe", requested_gpu=self.gpu)
-            compute_plan = explain_compute_plan("transcribe", selected_gpu)
-            print(f"  - Colab speech/perception worker: {selected_gpu} ({compute_plan['tier']})")
-            print(f"    Reason : {compute_plan['reason']}")
-            print(f"    Rate   : {compute_plan['cost']}")
+        print("\nLocal AI Tasks (Mac mini M4):")
+        print("  - After the first edit cut, run MLX Whisper on retained natural-audio clips only.")
+        print("  - The selected editorial director reviews timed candidates before any subtitle is applied.")
+        print("  - Colab is deferred; this workflow does not upload audio, frames, or video.")
 
-        # Upload estimate
-        est_audio_mb = 15.0 if video_count > 0 else 0.0
         print("\nResource & Transfer Estimates:")
-        print(f"  - Privacy Mode       : {self.policy.privacy_mode} (original 4K is never uploaded)")
-        print(f"  - Estimated Upload   : ~{est_audio_mb:.1f} MB of derived data only")
-        print(f"  - Estimated Whisper  : ~{video_count * 0.5:.1f} minutes")
-        print(f"  - Accelerator Tier   : {selected_gpu.upper()}")
-        print("  - Compute Units Burn : 0 CU (Dry run never allocates compute)")
+        print("  - User media transfer: none")
+        print("  - Compute Units      : 0 (Colab is not used)")
         print("==================================================")
 
     def is_stage_completed(self, stage: str) -> bool:
@@ -353,47 +340,10 @@ class PipelineOrchestrator:
             raise PipelineError("Stage 4 (audio) failed.")
 
     def run_stage_5_transcription(self) -> None:
-        print("[Stage 5/12] Speech Intelligence: checking audio and preparing Whisper/VAD analysis...")
+        print("[Stage 5/12] Speech Intelligence: waiting for the first edit cut...")
         self.emit_progress("speech", "started", "正在分析語音")
-        audio_index_file = self.project_dir / "work" / "transcripts" / "audio" / "index.json"
-        if not audio_index_file.is_file():
-            print("No audio sources to transcribe; skipping Whisper.")
-            return
-
-        audio_data = json.loads(audio_index_file.read_text(encoding="utf-8"))
-        assets = audio_data.get("assets", {})
-        if not assets:
-            print("No audio tracks detected in videos; skipping Whisper.")
-            return
-
-        if self.no_gpu or self.policy.privacy_mode == "LOCAL_ONLY":
-            print("Cloud speech inference is disabled by policy; local derivatives remain available.")
-            self.emit_progress("speech", "skipped", "語音分析保留在本機設定，未使用雲端")
-            return
-
-        from colab_transcription import command_colab_transcribe
-        for src, record in assets.items():
-            audio_out = record.get("output")
-            if not audio_out:
-                continue
-            print(f"Processing audio: {audio_out}")
-            args = argparse.Namespace(
-                project=str(self.project_dir),
-                source=audio_out,
-                model="large-v3-turbo",
-                language="zh",
-                gpu=self.gpu if self.gpu in {"T4", "L4"} else "T4",
-                allow_upload=self.allow_upload,
-                dry_run=self.dry_run,
-            )
-            try:
-                command_colab_transcribe(args)
-            except Exception as exc:
-                if self.allow_upload:
-                    raise PipelineError(f"Colab speech worker failed: {exc}") from exc
-                print(f"Speech analysis pending authorization: {exc}")
-                self.emit_progress("speech", "pending", "語音分析等待本次雲端授權")
-        self.emit_progress("speech", "completed", "語音分析準備完成")
+        print("Transcription is intentionally delayed until edit_plan.json identifies retained audio clips.")
+        self.emit_progress("speech", "deferred", "先完成剪輯選段，再本機分析保留現場聲")
 
     def run_stage_6_contact_sheets(self) -> None:
         print("[Stage 6/12] Contact Sheets: Extracting key stills & building 5x5 grids...")
@@ -611,6 +561,30 @@ class PipelineOrchestrator:
         # Generate human-readable edit_summary.md
         try:
             plan_data = json.loads(plan_file.read_text(encoding="utf-8"))
+            from qa_helpers import read_job_bool
+            if read_job_bool(self.project_dir, "captions", "enabled") is not False:
+                from video_editor.caption_pipeline import draft_selected_caption_candidates
+
+                self.emit_progress("speech", "started", "正在分析保留片段的語音")
+                try:
+                    candidate_doc = draft_selected_caption_candidates(
+                        self.project_dir, language="zh", local_files_only=True,
+                    )
+                except video_factory.UserFacingError as exc:
+                    print(f"Local speech analysis is pending: {exc}")
+                    self.emit_progress("speech", "pending", "本機語音辨識未就緒，字幕保留待處理")
+                else:
+                    candidate_count = len(candidate_doc.get("candidates", []))
+                    print(
+                        f"Local speech analysis: {candidate_count} timed caption candidate(s) from "
+                        f"{candidate_doc.get('selected_clip_count', 0)} retained natural-audio clip(s)."
+                    )
+                    if candidate_count:
+                        self.emit_progress("speech", "pending", "語音候選已產生，等待判斷字幕是否有意義")
+                    else:
+                        self.emit_progress("speech", "completed", "保留現場聲未偵測到可用語音字幕")
+            else:
+                self.emit_progress("speech", "skipped", "專案已停用字幕分析")
             self.emit_progress("music_requirements", "started", "正在分析配樂需求")
             prepare_music_artifacts(self.project_dir, self.policy, plan_data)
             self.emit_progress("music_requirements", "completed", "配樂需求分析完成")

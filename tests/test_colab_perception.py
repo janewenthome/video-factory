@@ -21,6 +21,7 @@ from perception import (
     COLAB_PACKAGE_VERSIONS,
     DIARIZATION_MODEL,
     DIARIZATION_MODEL_REVISION,
+    IMPORTANCE_PARAMETERS,
     SPEECH_ENGINE_VERSION,
     SPEECH_MODEL,
     SPEECH_MODEL_REPO,
@@ -118,8 +119,10 @@ class ColabPerceptionTests(unittest.TestCase):
         self.assertEqual(index["temporal"]["candidates"], [])
         self.assertEqual(index["privacy"]["eligible_uploads"]["proxies"], [])
         self.assertEqual(index["visual"]["event_groups"], [])
-        self.assertEqual(index["speech"]["audio_events_status"], "not_configured")
-        self.assertEqual(index["speech"]["importance_status"], "not_configured")
+        self.assertEqual(index["speech"]["audio_events_status"], "not_applicable")
+        self.assertEqual(index["speech"]["importance_status"], "not_applicable")
+        self.assertEqual(index["models"]["audio_events"]["status"], "not_applicable")
+        self.assertEqual(index["models"]["speech_importance"]["method"], colab.IMPORTANCE_METHOD)
 
     def test_only_explicit_shortlist_proxies_enter_temporal_bundle(self) -> None:
         index_path = build_perception_index(
@@ -237,9 +240,12 @@ class ColabPerceptionTests(unittest.TestCase):
                 "diarization_overlap_aware": False, "diarization_confidence_calibrated": False,
                 "vad": "faster-whisper-vad_filter",
                 "transcripts": [], "speech_turns": [], "anonymous_speakers": [],
-                "audio_events": [], "audio_events_status": "not_configured",
-                "importance": [], "importance_status": "not_configured",
-                "importance_method": None, "importance_confidence_calibrated": False,
+                "audio_events": [], "audio_events_status": "not_applicable",
+                "audio_events_method": colab.AUDIO_EVENT_METHOD,
+                "audio_events_confidence_calibrated": False,
+                "importance": [], "importance_status": "not_applicable",
+                "importance_method": colab.IMPORTANCE_METHOD,
+                "importance_confidence_calibrated": False,
             },
             "visual": {
                 "status": "completed", "items": [{
@@ -271,6 +277,13 @@ class ColabPerceptionTests(unittest.TestCase):
             "visual_engine_version": "transformers-4.57.6", "visual_dimension": 768,
             "temporal_model": TEMPORAL_MODEL, "temporal_model_revision": TEMPORAL_MODEL_REVISION,
             "temporal_prompt_version": "timeline-json.v1", "temporal_max_frames": 24,
+            "audio_event_model": colab.AUDIO_EVENT_MODEL,
+            "audio_event_model_revision": colab.AUDIO_EVENT_MODEL_REVISION,
+            "audio_event_method": colab.AUDIO_EVENT_METHOD,
+            "audio_event_window_seconds": colab.AUDIO_EVENT_WINDOW_SECONDS,
+            "audio_event_top_k": colab.AUDIO_EVENT_TOP_K,
+            "importance_method": colab.IMPORTANCE_METHOD,
+            "importance_parameters": IMPORTANCE_PARAMETERS,
             "bundle_path": "/content/in.zip", "work_root": "/content/work",
             "output_path": "/content/out.json", "timeout_seconds": 8700,
         }
@@ -286,6 +299,222 @@ class ColabPerceptionTests(unittest.TestCase):
         self.assertIn("TEMPORAL_ADAPTER_REGISTRY", inference_source)
         self.assertNotIn("plugin_required", inference_source)
         self.assertIn(VISUAL_MODEL_REVISION, source)
+        self.assertIn(colab.AUDIO_EVENT_MODEL_REVISION, inference_source)
+        self.assertIn("_write_failure", source)
+        self.assertIn('"status": "failed"', source)
+        self.assertIn("capture_output=True", source)
+
+    def test_structured_remote_worker_diagnostics_are_safe_and_fail_closed(self) -> None:
+        remote = {
+            "schema_version": "perception-index.v1", "worker_version": WORKER_VERSION,
+            "stage": "perception", "status": "failed",
+            "diagnostic": {
+                "phase": "package_install", "error_type": "RuntimeError",
+                "message": "ImportError hf_abcdefgh12345678 https://example.com/private /content/user.wav",
+            },
+        }
+        with self.assertRaisesRegex(UserFacingError, "package_install") as captured:
+            colab._validate_remote_result(
+                remote, {}, stage="perception", manifest={}, gpu="T4",
+            )
+        self.assertIn("[redacted-token]", str(captured.exception))
+        self.assertNotIn("hf_abcdefgh12345678", str(captured.exception))
+        self.assertNotIn("example.com", str(captured.exception))
+        self.assertNotIn("user.wav", str(captured.exception))
+
+    def test_generated_worker_failure_writer_emits_only_a_redacted_receipt(self) -> None:
+        configuration = {
+            "worker_version": WORKER_VERSION, "stage": "perception",
+            "output_path": str(self.project / "remote-result.json"),
+        }
+        source = colab._worker_source(configuration)
+        tree = ast.parse(source)
+        helper_nodes = [
+            node for node in tree.body
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            or isinstance(node, ast.FunctionDef) and node.name in {"_safe_diagnostic", "_write_failure"}
+        ]
+        namespace = {"CONFIG": configuration}
+        exec(compile(ast.Module(body=helper_nodes, type_ignores=[]), "generated-colab-helper", "exec"), namespace)
+        namespace["_write_failure"](
+            RuntimeError("hf_abcdefgh12345678 https://example.com/token /content/private.wav"),
+            "perception_inference",
+        )
+        receipt = json.loads((self.project / "remote-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt["diagnostic"]["phase"], "perception_inference")
+        self.assertNotIn("hf_abcdefgh12345678", receipt["diagnostic"]["message"])
+        self.assertNotIn("example.com", receipt["diagnostic"]["message"])
+        self.assertNotIn("private.wav", receipt["diagnostic"]["message"])
+
+    def test_generated_worker_captures_child_failure_without_leaking_logs(self) -> None:
+        output = self.project / "simulated-remote-result.json"
+        configuration = {
+            "worker_version": WORKER_VERSION, "stage": "perception", "gpu": "T4",
+            "packages": {"transformers": "4.57.6"}, "output_path": str(output),
+        }
+        source = colab._worker_source(configuration)
+        def fake_run(command, **kwargs):
+            if command[0] == "nvidia-smi":
+                return SimpleNamespace(returncode=0, stdout="Tesla T4\n", stderr="")
+            if "pip" in command:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="RuntimeError hf_abcdefgh12345678 https://example.com/key /content/private.wav",
+            )
+        with patch("subprocess.run", side_effect=fake_run), patch(
+            "importlib.util.find_spec",
+            return_value=SimpleNamespace(submodule_search_locations=["/fake/site-packages"]),
+        ):
+            exec(compile(source, "generated-colab-worker", "exec"), {})
+        receipt = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt["diagnostic"]["phase"], "perception_inference")
+        self.assertNotIn("hf_abcdefgh12345678", receipt["diagnostic"]["message"])
+        self.assertNotIn("example.com", receipt["diagnostic"]["message"])
+        self.assertNotIn("private.wav", receipt["diagnostic"]["message"])
+
+    def test_remote_exec_failure_downloads_only_nonce_result_and_never_accepts_success(self) -> None:
+        index_path = build_perception_index(
+            self.project, privacy_mode="BALANCED", gpu_policy="T4",
+            cloud=True, allow_upload=True, temporal_backend="none",
+        )
+        base = json.loads(index_path.read_text(encoding="utf-8"))
+        failure_receipt = {
+            "schema_version": "perception-index.v1", "worker_version": WORKER_VERSION,
+            "stage": "perception", "status": "failed",
+            "diagnostic": {
+                "phase": "perception_inference", "error_type": "RuntimeError",
+                "message": "model import failed hf_abcdefgh12345678 /content/private.wav",
+            },
+        }
+
+        def run_with_receipt(receipt: dict[str, object]) -> tuple[UserFacingError, list[str]]:
+            commands: list[str] = []
+
+            def fake_colab(_cli_path: str, stage: str, arguments: list[str]) -> None:
+                commands.append(stage)
+                if stage == "exec":
+                    raise UserFacingError("Colab CLI exec command failed; command output was suppressed.")
+                if stage == "download":
+                    Path(arguments[-1]).write_text(json.dumps(receipt), encoding="utf-8")
+
+            with patch.object(colab, "_colab_usage_snapshot", return_value={"balance": "200.00", "rate": "0.00", "assignments": "0"}), patch.object(
+                colab, "_print_usage_snapshot",
+            ), patch.object(colab, "_run_colab", side_effect=fake_colab), patch.object(
+                colab, "_owned_session_released", return_value=True,
+            ):
+                try:
+                    colab._run_remote_stage(
+                        self.project, base, cli_path="colab", stage="perception", gpu="T4",
+                        privacy_mode="BALANCED", temporal_backend="none",
+                    )
+                except UserFacingError as exc:
+                    return exc, commands
+            self.fail("remote result was accepted after the Colab CLI reported an exec failure")
+
+        error, commands = run_with_receipt(failure_receipt)
+        self.assertIn("perception_inference", str(error))
+        self.assertIn("[redacted-token]", str(error))
+        self.assertNotIn("private.wav", str(error))
+        self.assertEqual(commands.count("download"), 1)
+        self.assertEqual(commands.count("stop"), 1)
+
+        completed_receipt = dict(failure_receipt, status="completed")
+        error, commands = run_with_receipt(completed_receipt)
+        self.assertIn("did not provide a verified failure receipt", str(error))
+        self.assertEqual(commands.count("download"), 1)
+        self.assertEqual(commands.count("stop"), 1)
+
+    def test_audio_event_and_importance_payloads_require_pinned_uncalibrated_metadata(self) -> None:
+        base = {"privacy": {"mode": "BALANCED"}}
+        digest = "a" * 64
+        source = self.source
+        manifest = {
+            "stage": "perception", "privacy_mode": "BALANCED",
+            "audio": [{"source": source, "sha256": digest, "path": "audio/test.wav"}],
+            "frames": [], "proxies": [],
+        }
+        segment = {
+            "start": 0.0, "end": 1.0, "text": "hello there",
+            "words": [{"start": 0.0, "end": 0.4, "word": "hello"},
+                      {"start": 0.5, "end": 0.9, "word": "there"}],
+        }
+        importance = colab._speech_importance_record(source, segment, -24.0)
+        remote = {
+            "schema_version": "perception-index.v1", "worker_version": WORKER_VERSION,
+            "stage": "perception", "status": "completed",
+            "privacy": {"mode": "BALANCED", "original_media_uploaded": False},
+            "compute": {"gpu_policy": "T4", "gpu_name": "Tesla T4", "premium_gpu_allowed": False},
+            "runtime": {
+                "gpu_name": "Tesla T4", "python": "3.12.0", "cuda_version": "12.8",
+                "packages": colab._runtime_packages("perception"),
+            },
+            "models": {
+                "speech": {"name": SPEECH_MODEL, "repo": SPEECH_MODEL_REPO,
+                           "revision": SPEECH_MODEL_REVISION, "engine": SPEECH_ENGINE_VERSION,
+                           "status": "completed"},
+                "diarization": {"name": DIARIZATION_MODEL, "revision": DIARIZATION_MODEL_REVISION,
+                                "status": "completed", "method": "speechbrain-ecapa-utterance-clustering.v1",
+                                "overlap_aware": False, "confidence_calibrated": False},
+                "audio_events": {"name": colab.AUDIO_EVENT_MODEL,
+                                 "revision": colab.AUDIO_EVENT_MODEL_REVISION,
+                                 "engine": f"transformers-{COLAB_PACKAGE_VERSIONS['transformers']}",
+                                 "status": "completed", "method": colab.AUDIO_EVENT_METHOD,
+                                 "sampling_rate": 16000,
+                                 "window_seconds": colab.AUDIO_EVENT_WINDOW_SECONDS,
+                                 "top_k": colab.AUDIO_EVENT_TOP_K, "score_calibrated": False},
+                "speech_importance": {
+                    "method": colab.IMPORTANCE_METHOD, "parameters": IMPORTANCE_PARAMETERS,
+                    "status": "completed", "confidence_calibrated": False,
+                    "interpretation": "uncalibrated_candidate_signal_not_semantic_importance",
+                },
+            },
+            "transfer_manifest": manifest,
+            "speech": {
+                "vad": "faster-whisper-vad_filter", "status": "completed",
+                "diarization_status": "completed",
+                "diarization_method": "speechbrain-ecapa-utterance-clustering.v1",
+                "diarization_overlap_aware": False, "diarization_confidence_calibrated": False,
+                "transcripts": [{"source": source, "source_sha256": digest,
+                                 "duration_seconds": 2.0, "model": SPEECH_MODEL,
+                                 "model_repo": SPEECH_MODEL_REPO,
+                                 "model_revision": SPEECH_MODEL_REVISION,
+                                 "segments": [segment]}],
+                "speech_turns": [{"source": source, "start": 0.0, "end": 1.0,
+                                  "text": "hello there", "speaker_id": "unknown",
+                                  "confidence": None, "similarity_to_cluster": None}],
+                "anonymous_speakers": [],
+                "audio_events": [{"source": source, "start_seconds": 0.0,
+                                  "end_seconds": 2.0, "label": "Speech", "score": 0.5,
+                                  "method": colab.AUDIO_EVENT_METHOD, "confidence": None}],
+                "audio_events_status": "completed",
+                "audio_events_method": colab.AUDIO_EVENT_METHOD,
+                "audio_events_confidence_calibrated": False,
+                "importance": [importance], "importance_status": "completed",
+                "importance_method": colab.IMPORTANCE_METHOD,
+                "importance_confidence_calibrated": False,
+            },
+            "visual": {"items": [], "status": "not_applicable", "similarity_clusters": {},
+                       "event_groups": [], "event_groups_status": "not_configured"},
+        }
+        colab._validate_remote_result(remote, base, stage="perception", manifest=manifest, gpu="T4")
+        remote["speech"]["audio_events"][0]["confidence"] = 0.99
+        with self.assertRaises(UserFacingError):
+            colab._validate_remote_result(remote, base, stage="perception", manifest=manifest, gpu="T4")
+
+    def test_speech_importance_is_a_reproducible_uncalibrated_signal(self) -> None:
+        segment = {
+            "start": 2.0, "end": 7.0, "text": "A useful phrase here.",
+            "words": [{"word": word} for word in ("A", "useful", "phrase", "here.")],
+        }
+        result = colab._speech_importance_record("assets/videos/clip.mp4", segment, -25.0)
+        self.assertEqual(result["method"], colab.IMPORTANCE_METHOD)
+        self.assertIsNone(result["confidence"])
+        self.assertEqual(result["signals"]["word_count"], 4)
+        self.assertEqual(result["signals"]["duration_seconds"], 5.0)
+        self.assertGreater(result["score"], 0.0)
+        self.assertLessEqual(result["score"], 1.0)
 
     def test_cli_exposes_repeatable_explicit_temporal_sources(self) -> None:
         parser = build_parser()

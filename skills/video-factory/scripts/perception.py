@@ -37,7 +37,7 @@ from video_factory import (
 
 
 INDEX_SCHEMA_VERSION = "perception-index.v1"
-WORKER_VERSION = "colab-perception.v2"
+WORKER_VERSION = "colab-perception.v4"
 SPEECH_MODEL = "large-v3-turbo"
 SPEECH_ENGINE_VERSION = "faster-whisper-1.2.1"
 SPEECH_MODEL_REPO = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
@@ -48,6 +48,20 @@ VISUAL_MODEL = "google/siglip2-base-patch16-224"
 VISUAL_MODEL_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
 TEMPORAL_MODEL = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
 TEMPORAL_MODEL_REVISION = "482adb537c021c86670beed01cd58990d01e72e4"
+AUDIO_EVENT_MODEL = "MIT/ast-finetuned-audioset-10-10-0.4593"
+AUDIO_EVENT_MODEL_REVISION = "f826b80d28226b62986cc218e5cec390b1096902"
+AUDIO_EVENT_METHOD = "ast-audioset-window-candidates.v1"
+AUDIO_EVENT_WINDOW_SECONDS = 10
+AUDIO_EVENT_TOP_K = 3
+AUDIO_EVENT_SAMPLE_RATE = 16000
+IMPORTANCE_METHOD = "transcript-acoustic-heuristic.v1"
+IMPORTANCE_PARAMETERS = {
+    "word_count_scale": 24.0,
+    "duration_seconds_scale": 12.0,
+    "rms_dbfs_floor": -50.0,
+    "rms_dbfs_ceiling": -15.0,
+    "weights": {"words": 0.45, "duration": 0.30, "energy": 0.25},
+}
 COLAB_PACKAGE_VERSIONS = {
     "faster-whisper": "1.2.1",
     "ctranslate2": "4.6.0",
@@ -192,7 +206,14 @@ def _audio_upload_candidates(project: Path) -> list[dict[str, Any]]:
         if resolved is None:
             continue
         relative, path = resolved
-        candidates.append({"source": source, "path": relative, "sha256": sha256_file(path)})
+        streams = record.get("audio_streams", [])
+        language = next((item.get("language") for item in streams if isinstance(item, dict) and item.get("language")), None) if isinstance(streams, list) else None
+        candidates.append({
+            "source": source,
+            "path": relative,
+            "sha256": sha256_file(path),
+            "language": language,
+        })
     return candidates
 
 
@@ -405,6 +426,7 @@ def build_perception_index(
         "manifest": [{"source": item.get("source"), "sha256": item.get("sha256")} for item in manifest_assets],
         "frames": [{"path": item["path"], "sha256": item["sha256"]} for item in frames],
         "audio": audio_candidates,
+        "transcripts": transcripts,
         "privacy_mode": policy.privacy_mode,
         "gpu_policy": policy.gpu_policy,
         "speech": {
@@ -412,16 +434,47 @@ def build_perception_index(
             "engine": SPEECH_ENGINE_VERSION,
             "model_repo": SPEECH_MODEL_REPO,
             "model_revision": SPEECH_MODEL_REVISION,
+            "parameters": {"word_timestamps": True, "vad_filter": True},
         },
         "diarization": {
             "model": DIARIZATION_MODEL,
             "model_revision": DIARIZATION_MODEL_REVISION,
             "algorithm": "clip-local-ecapa-cosine-heuristic.v1",
+            "parameters": {
+                "embedding_dimension": 192,
+                "minimum_duration_seconds": 1.5,
+                "new_speaker_below_similarity": 0.62,
+                "assign_above_similarity": 0.78,
+                "minimum_cluster_margin": 0.06,
+                "overlap_aware": False,
+            },
+        },
+        "audio_events": {
+            "model": AUDIO_EVENT_MODEL,
+            "model_revision": AUDIO_EVENT_MODEL_REVISION,
+            "method": AUDIO_EVENT_METHOD,
+            "window_seconds": AUDIO_EVENT_WINDOW_SECONDS,
+            "top_k": AUDIO_EVENT_TOP_K,
+            "sample_rate": AUDIO_EVENT_SAMPLE_RATE,
+            "score_calibrated": False,
+        },
+        "speech_importance": {
+            "method": IMPORTANCE_METHOD,
+            "parameters": IMPORTANCE_PARAMETERS,
+            "confidence_calibrated": False,
         },
         "visual": {
             "model": VISUAL_MODEL,
             "model_revision": VISUAL_MODEL_REVISION,
             "engine": VISUAL_ENGINE_VERSION,
+            "similarity_method": "siglip2-cosine-threshold-0.92.v1",
+            "similarity_threshold": 0.92,
+        },
+        "temporal": {
+            "backend": selected_backend,
+            "model": TEMPORAL_ADAPTERS[selected_backend]["model"] if selected_backend in TEMPORAL_ADAPTERS else None,
+            "model_revision": TEMPORAL_ADAPTERS[selected_backend]["revision"] if selected_backend in TEMPORAL_ADAPTERS else None,
+            "parameters": {"max_frames": 24, "prompt_version": "timeline-json.v1"},
         },
         "packages": COLAB_PACKAGE_VERSIONS,
         "worker_version": WORKER_VERSION,
@@ -450,6 +503,13 @@ def build_perception_index(
             cached_privacy = cached.setdefault("privacy", {})
             cached_privacy["mode"] = policy.privacy_mode
             completed_cloud_result = cached_privacy.get("cloud_status") == "completed"
+            has_pending_cloud_inputs = bool(audio_candidates or frames)
+            pending_status = (
+                "pending_colab"
+                if cloud_status != "not_requested" and has_pending_cloud_inputs
+                else "not_requested"
+            )
+            cached_speech = cached.setdefault("speech", {})
             if not completed_cloud_result:
                 cached_privacy["cloud_status"] = cloud_status
             cached_privacy["original_media_uploaded"] = False
@@ -461,15 +521,17 @@ def build_perception_index(
             }
             cached.setdefault("compute", {})["gpu_policy"] = policy.gpu_policy
             if not completed_cloud_result:
-                has_pending_cloud_inputs = bool(
-                    cached_privacy["eligible_uploads"]["audio"]
-                    or cached_privacy["eligible_uploads"]["representative_frames"]
-                )
-                pending_status = "pending_colab" if cloud_status != "not_requested" and has_pending_cloud_inputs else "not_requested"
-                cached_speech = cached.setdefault("speech", {})
                 if cached_speech.get("status") != "completed":
                     cached_speech["status"] = pending_status if audio_candidates else "not_applicable"
                     cached_speech["diarization_status"] = pending_status if audio_candidates else "not_applicable"
+                if cached_speech.get("audio_events_status") != "completed":
+                    cached_speech["audio_events_status"] = pending_status if audio_candidates else "not_applicable"
+                    cached_speech["audio_events_method"] = AUDIO_EVENT_METHOD
+                    cached_speech["audio_events_confidence_calibrated"] = False
+                if cached_speech.get("importance_status") != "completed":
+                    cached_speech["importance_status"] = pending_status if audio_candidates else "not_applicable"
+                    cached_speech["importance_method"] = IMPORTANCE_METHOD
+                    cached_speech["importance_confidence_calibrated"] = False
                 cached_visual = cached.setdefault("visual", {})
                 if cached_visual.get("status") != "completed":
                     cached_visual["status"] = pending_status if frames else "not_applicable"
@@ -481,6 +543,16 @@ def build_perception_index(
                 "backend": selected_backend,
                 "name": TEMPORAL_ADAPTERS[selected_backend]["model"] if selected_backend in TEMPORAL_ADAPTERS else None,
                 "revision": TEMPORAL_ADAPTERS[selected_backend]["revision"] if selected_backend in TEMPORAL_ADAPTERS else None,
+            }
+            cached.setdefault("models", {})["audio_events"] = {
+                "name": AUDIO_EVENT_MODEL,
+                "revision": AUDIO_EVENT_MODEL_REVISION,
+                "method": AUDIO_EVENT_METHOD,
+                "status": "completed" if cached_speech.get("audio_events_status") == "completed" else pending_status if audio_candidates else "not_applicable",
+                "window_seconds": AUDIO_EVENT_WINDOW_SECONDS,
+                "top_k": AUDIO_EVENT_TOP_K,
+                "sample_rate": AUDIO_EVENT_SAMPLE_RATE,
+                "score_calibrated": False,
             }
             cached.setdefault("temporal", {}).update({
                 "backend": selected_backend,
@@ -532,6 +604,21 @@ def build_perception_index(
                 "method": "clip-local-ecapa-cosine-heuristic.v1",
                 "confidence_calibrated": False,
             },
+            "audio_events": {
+                "name": AUDIO_EVENT_MODEL,
+                "revision": AUDIO_EVENT_MODEL_REVISION,
+                "method": AUDIO_EVENT_METHOD,
+                "status": "pending_colab" if audio_candidates and cloud_status != "not_requested" else "not_requested" if audio_candidates else "not_applicable",
+                "window_seconds": AUDIO_EVENT_WINDOW_SECONDS,
+                "top_k": AUDIO_EVENT_TOP_K,
+                "sample_rate": AUDIO_EVENT_SAMPLE_RATE,
+                "score_calibrated": False,
+            },
+            "speech_importance": {
+                "method": IMPORTANCE_METHOD,
+                "parameters": IMPORTANCE_PARAMETERS,
+                "confidence_calibrated": False,
+            },
             "visual": {"name": VISUAL_MODEL, "revision": VISUAL_MODEL_REVISION, "engine": VISUAL_ENGINE_VERSION},
             "temporal": {
                 "backend": selected_backend,
@@ -553,9 +640,11 @@ def build_perception_index(
                 "pending_colab" if audio_candidates and cloud_status != "not_requested"
                 else "not_requested" if audio_candidates else "not_applicable"
             ),
-            "audio_events_status": "not_configured",
-            "importance_status": "not_configured",
-            "importance_method": None,
+            "audio_events_status": "pending_colab" if audio_candidates and cloud_status != "not_requested" else "not_requested" if audio_candidates else "not_applicable",
+            "audio_events_method": AUDIO_EVENT_METHOD,
+            "audio_events_confidence_calibrated": False,
+            "importance_status": "pending_colab" if audio_candidates and cloud_status != "not_requested" else "not_requested" if audio_candidates else "not_applicable",
+            "importance_method": IMPORTANCE_METHOD,
             "importance_confidence_calibrated": False,
         },
         "visual": {

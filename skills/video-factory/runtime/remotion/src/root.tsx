@@ -57,7 +57,7 @@ const segmentFrames = (segment: Segment, fps: number) =>
 
 const mediaUrl = (url: string) => staticFile(url.replace(/^\/+/, ''));
 
-const audioVolume = (segment: Segment, fps: number, localFrame: number, duckingRanges: ReadonlyArray<readonly [number, number]> = []) => {
+export const audioVolume = (segment: Segment, fps: number, localFrame: number, duckingRanges: ReadonlyArray<readonly [number, number]> = []) => {
   const durationFrames = segmentFrames(segment, fps);
   const defaultFade = segment.type === 'music' ? 0.25 : 0.1;
   const fadeInFrames = secondsToFrames(segment.fade_in_seconds ?? defaultFade, fps);

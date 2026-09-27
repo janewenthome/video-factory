@@ -82,9 +82,29 @@ class ProductFeatureTests(unittest.TestCase):
                 args = parser.parse_args([command, str(self.project), "--temporal-backend", "smolvlm2"])
                 self.assertEqual(args.temporal_backend, "smolvlm2")
 
+    def test_colab_cli_accepts_an_explicit_temporal_source_shortlist(self) -> None:
+        args = build_product_cli_parser().parse_args([
+            "colab-perception", str(self.project), "--temporal-backend", "smolvlm2",
+            "--temporal-source", "assets/videos/one.MOV",
+            "--temporal-source", "assets/videos/two.MOV",
+        ])
+        self.assertEqual(args.temporal_sources, [
+            "assets/videos/one.MOV", "assets/videos/two.MOV",
+        ])
+
     def test_perception_subcommand_inherits_job_cloud_setting_when_flag_is_omitted(self) -> None:
         args = build_skill_cli_parser().parse_args(["perception", str(self.project)])
         self.assertIsNone(args.cloud)
+
+    def test_caption_cli_uses_cached_model_by_default_and_requires_opt_in_to_download(self) -> None:
+        parser = build_skill_cli_parser()
+        local_args = parser.parse_args(["draft-captions", str(self.project)])
+        download_args = parser.parse_args([
+            "draft-captions", str(self.project), "--allow-model-download",
+        ])
+
+        self.assertTrue(local_args.local_only)
+        self.assertFalse(download_args.local_only)
 
     def test_perception_index_never_marks_original_upload(self) -> None:
         path = build_perception_index(self.project)
