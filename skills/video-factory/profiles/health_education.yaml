@@ -11,7 +11,7 @@ duration_ranges:
   standard: [75, 105]
   full: [150, 210]
 default_duration_preset: standard
-privacy_mode: BALANCED
+privacy_mode: LOCAL_ONLY
 gpu_policy: T4
 temporal_backend: none
 
@@ -49,7 +49,7 @@ text:
   allow_text_cards: true
 
 narration:
-  default: auto_if_useful
+  default: none
 
 music:
   mode: auto_open_licensed

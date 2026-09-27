@@ -12,6 +12,15 @@
 
 需求：Python 3.11+、FFmpeg/ffprobe；本機 render 需要 Node.js、pnpm 和 Remotion runtime。Apple Silicon 語音推論使用 `mlx-whisper==0.4.3`；預設重用固定版 `mlx-community/whisper-large-v3-mlx` snapshot，並且只查本機快取，不自動下載權重。只有明確加入 `--allow-model-download` 才會在 cache miss 時下載。
 
+在新 Codex 對話輸入 `start`、`開始`、`開工`，或詢問怎麼開始剪片時，Video Factory Skill 會先給引導：家庭／旅遊／生活回憶選 `memory`，醫療／衛教選 `public-health`；不會在起始訪談詢問是否需要旁白。家庭影片的建專案範例：
+
+```bash
+cd /Volumes/2TB/program/video_factory
+python3 skills/video-factory/scripts/video_factory.py init projects/first-edit --profile memory
+```
+
+衛教影片把 `memory` 改成 `public-health`，並備妥可引用的來源。把一小批素材的複本放入新專案的 `assets/videos/`、`assets/photos/`，原始檔留在原位置。接著提供影片類型、片長、比例、主題／要留下的時刻，以及複本所在的專案路徑；不必先整理或複製整個素材庫。
+
 ```bash
 # 建立新專案，先檢查 job.draft.yaml，再核准為 job.yaml
 python3 skills/video-factory/scripts/video_factory.py init projects/my-family-edit --profile memory
@@ -57,13 +66,13 @@ Codex 閱讀 `work/transcripts/caption_candidates.json`，對每個候選寫入 
 
 若候選都是噪音、幻覺、純語助詞或無法辨識片段，標記 `drop`；有意義內容保留原意，不自行改寫。SRT 僅在通過時間、重疊和片長驗證後交給 renderer。
 
-目前工作流程不啟動 Colab，不上傳音訊、影格或影片。Colab worker code 保留為未來可選擴充；[Google Colab MCP](https://github.com/googlecolab/colab-mcp) 要求 client 支援動態 `notifications/tools/list_changed`，而 [Codex issue #43642](https://github.com/openai/codex/issues/43642) 記錄了非同步啟動時工具清單未刷新的情形，因此先暫緩使用。未來任何雲端服務都必須先列出實際衍生檔並取得該次同意。原始 4K 與整個素材庫都不應上傳。
+目前剪輯工作流程在 Mac 本機執行，不會把音訊、影格或影片交給 Colab。Colab worker code 保留為未來可選擴充；[Google Colab MCP](https://github.com/googlecolab/colab-mcp) 要求 client 支援動態 `notifications/tools/list_changed`，而 [Codex issue #43642](https://github.com/openai/codex/issues/43642) 記錄了非同步啟動時工具清單未刷新的情形，因此先暫緩使用。更多已確認的架構決定與踩坑記錄見 [docs/DECISIONS.md](docs/DECISIONS.md)。
 
 ### 音樂搜尋
 
-Openverse 收錄來自多個來源的大量音訊和影像，可用不同曲風／情緒關鍵字重複搜尋並切換候選；搜尋範圍與結果會隨上游資料改變。系統不會自動挑選或下載歌曲。[Openverse](https://openverse.org/) 不替個別作品確認授權，因此下載前必須回原始來源頁核對授權與歸因。
+Codex 的標準剪輯流程預設自動配樂。它會依照影片主題、故事和情緒產生搜尋詞，在 Openverse 搜尋後挑選並套用合適候選，不會要求使用者先挑一首歌。背景音樂預設覆蓋全片；保留現場聲片段時，只將配樂在約 0.25 秒內平滑壓低至基準音量的 24%，現場聲維持原始音量，片段結束後配樂在約 0.25 秒內恢復。使用者可在 job 或明確要求中關閉配樂或指定歌曲。
 
-`music search` 只列出 Openverse 索引中通過基本 CC0、PDM 或 CC BY metadata 檢查的音訊，不會自動下載或選曲。使用者明確選曲後，可用 `music add <ID>` 下載至專案 `work/`，並保存來源和授權證據。Openverse 是聚合搜尋服務，使用前仍要開啟原始來源頁檢查授權、歸因及同步到影片的條件。
+Openverse 是聚合搜尋服務，不替個別作品確認授權。下載和使用前，Codex 必須檢查原始來源頁的作品、授權與署名要求；只使用可核實的 Public Domain、CC0 或 CC BY 曲目，並產生 credits。若原始來源或授權無法核實，就略過該曲；找不到合格歌曲時不套用音樂。單獨使用 CLI `music search` / `music add` 時仍是手動搜尋／下載；自動依影片主題搜尋、選曲和加入是 Skill 編排的剪輯流程。
 
 ```bash
 python3 -m video_editor music search --project projects/my-family-edit warm acoustic instrumental
@@ -115,11 +124,11 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 | Colab notebook / GPU perception | Optional, currently deferred | Codex dynamic MCP tool refresh support is not available reliably; no current inference/upload path |
 | 視覺 QA | 人工檢視 / Computer Use when needed | 不以滑鼠操作 timeline |
 | Optional external transcription | 使用者明確選用時 | 需要單獨、逐次授權；不作為本機或 Colab 失敗時的自動 fallback。 |
-| TTS 旁白 | 尚未接入 | 預設關閉；建立旁白文稿後才考慮接入與計費 |
+| TTS 旁白 | 尚未接入 | 旁白預設不加入；起始訪談不詢問旁白需求，只有使用者提出時才討論 |
 
 Apple Silicon local Whisper supports cut-first transcription and word-level timestamps. A live run on one M4 processed a few short retained clips using an already-cached MLX Whisper large-v3 snapshot; this is not a general speed or accuracy benchmark. Recording conditions and model version affect transcription quality, so review every candidate. The existing SigLIP2, anonymous speaker and temporal adapters have not completed live Colab inference or GPU/CU benchmarks and are not used by the current workflow. Audio event detection and speech-importance scoring remain unconfigured. Local-only mode supports asset inventory, local perception evidence, story/edit planning, Remotion rendering, SRT export and technical QA. OpenAI keys must only be supplied via `OPENAI_API_KEY`; `.env.example` contains no real key. TTS is not connected.
 
-不要自動下載音樂。`music-library/manifest.yaml` 只列出使用者擁有或明確有權使用的曲目。
+`music-library/manifest.yaml` 只列出使用者擁有或明確有權使用的本機曲目。Openverse 自動選曲的授權來源與 credits 必須一併記錄。
 
 ## 安裝與主要檔案
 

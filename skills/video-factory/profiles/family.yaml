@@ -11,7 +11,7 @@ duration_ranges:
   standard: [150, 210]
   full: [250, 330]
 default_duration_preset: standard
-privacy_mode: BALANCED
+privacy_mode: LOCAL_ONLY
 gpu_policy: T4
 temporal_backend: none
 

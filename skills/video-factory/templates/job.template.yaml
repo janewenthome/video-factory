@@ -22,12 +22,12 @@ text_annotations:
   density: low # low | medium | high
 
 narration:
-  mode: none # none | auto_if_useful | user_provided
+  mode: none # none | auto_if_useful | user_provided; do not ask about narration during initial intake
 
 music:
   enabled: true
   mode: auto_open_licensed # auto_open_licensed | project_music | local_licensed | none
-  mood: []
+  mood: [] # derive search terms from the project topic/story when empty
   intensity: low_to_medium # low | low_to_medium | medium | high
 
 natural_audio:
@@ -44,18 +44,14 @@ privacy_review:
   check_identifiable_people: true
   review_before_publication: true
 
-# Cloud media processing stays opt-in per run. Set colab to "disabled" to
-# forbid Colab transfers for this project; "ask_each_run" still requires
-# explicit authorization for the selected file before a cache miss is sent.
+# The current production workflow processes media locally.
 cloud_processing:
-  colab: ask_each_run # ask_each_run | disabled
-  openai: ask_each_run # ask_each_run | disabled
+  colab: disabled # ask_each_run | disabled
+  openai: disabled # ask_each_run | disabled
 
-# Perception is evidence generation, not editorial selection.  BALANCED is the
-# default: only derived audio, representative frames and low-resolution proxy
-# data may be sent after explicit authorization.  Original 4K never leaves
-# the Mac.  L4 is reserved for shortlist-only temporal analysis.
-privacy_mode: BALANCED # LOCAL_ONLY | BALANCED | MAX_QUALITY
+# Perception is evidence generation, not editorial selection. Current jobs use
+# local-only processing; original media remains on the Mac.
+privacy_mode: LOCAL_ONLY # LOCAL_ONLY | BALANCED | MAX_QUALITY
 cloud_perception: false
 gpu_policy: T4
 temporal_backend: none # none | smolvlm2

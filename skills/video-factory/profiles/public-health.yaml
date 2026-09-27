@@ -35,7 +35,7 @@ text:
   allow_text_cards: true
 
 narration:
-  default: auto_if_useful
+  default: none
 
 references:
   required_for_medical_claims: true

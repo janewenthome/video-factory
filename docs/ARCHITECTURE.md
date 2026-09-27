@@ -68,6 +68,13 @@ Mac mini M4
 
 字幕語意審閱不得改寫說話者原意。衛教影片字幕中的醫療主張必須回指使用者提供的內容或 references；找不到來源時標記待確認。
 
+## 自動配樂與現場聲
+
+- 新 job 預設啟用 `auto_open_licensed` 配樂。Codex 依 job 主題和 story plan 搜尋 Openverse、挑選曲目並加入剪輯計畫；不詢問使用者先選歌。
+- Openverse 是聚合索引，不代表授權已核實。加入前檢查原始來源頁的曲目、授權與署名條件；只用可以核實的 Public Domain、CC0 或 CC BY 曲目，並保留 attribution/credits。查不到來源或授權時跳過，不猜測。
+- 配樂預設由片頭播放到片尾。保留片段的自然收音維持原始增益（預設 1.0）；只在自然聲期間把配樂平滑降到基準增益的 24%，約 0.25 秒下降、自然聲結束後約 0.25 秒恢復。這是 renderer 已實作的行為。
+- 只有使用者或 job 明確指定才關閉配樂或使用指定曲目。不要把自動配樂理解成可以降低自然收音音量。
+
 ## 隱私、快取與重跑
 
 - 預設保持本機處理；`LOCAL_ONLY` 禁止任何資料上傳。其他隱私模式目前不會自動啟動 Colab。
@@ -83,3 +90,5 @@ Mac mini M4
 - Colab SigLIP2、匿名 diarization、temporal analysis 尚無本專案 live GPU/Compute Units benchmark。
 - 有音訊不一定有值得呈現的語音；需經語音辨識與語意檢查後再決定字幕。沒有 meaningful cue 時可以不燒錄字幕。
 - 只有播放並檢視成品後才可宣稱視覺與聽覺 QA 完成。
+- 新對話的 `start`／`開始`／`開工` 或一般「怎麼開始剪片」詢問使用引導式 intake；旁白不列為起始問題，配樂自動開啟。
+- 已發現的專案踩坑與決策記錄於 [DECISIONS.md](DECISIONS.md)。
