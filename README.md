@@ -68,6 +68,10 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 
 `edit_plan.json` 是 render 的剪輯決策來源。Renderer 不會自行挑素材、改故事或補寫醫療資訊。16:9 與 9:16 需分別做構圖決定，並各自 render。
 
+編輯計畫選用 HEIC 照片時，`prepare-render` 會以 libheif 優先、FFmpeg 解碼驗證的流程建立最長邊 4096px 的 JPEG 衍生檔，存放在 `work/render-public/assets/` 並以來源雜湊快取；Remotion 使用 JPEG，HEIC 原檔不會被修改。
+
+9:16 編輯若將團照設為 `contain`，renderer 會保留完整照片，並以同一張照片的柔焦暗化版本延伸直式畫布，避免人物被裁掉或留下純色空帶。
+
 每次 render 會在 `outputs/versions/` 保存 edit plan、review/music metadata 與該版本影片；重新修改不會只覆蓋上一版的決策記錄。
 
 ## 範例專案

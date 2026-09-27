@@ -68,7 +68,7 @@ class CoreRegressions(unittest.TestCase):
             patch.object(media_helpers.subprocess, "run", side_effect=fake_converter) as converter,
             patch.object(media_helpers, "run_ffmpeg_output", side_effect=fake_scale),
         ):
-            ok, _ = media_helpers.run_sips_output(source, output)
+            ok, _ = media_helpers.decode_heic_output(source, output)
 
         self.assertTrue(ok)
         self.assertTrue(output.is_file())
@@ -92,11 +92,38 @@ class CoreRegressions(unittest.TestCase):
             patch.object(media_helpers.subprocess, "run", side_effect=fake_converter),
             patch.object(media_helpers, "run_ffmpeg_output", return_value=(False, "JPEG decode failed")),
         ):
-            ok, detail = media_helpers.run_sips_output(source, output)
+            ok, detail = media_helpers.decode_heic_output(source, output)
 
         self.assertFalse(ok)
         self.assertIn("could not be decoded", detail)
         self.assertFalse(output.exists())
+
+    def test_heic_decode_uses_ffmpeg_directly_when_libheif_is_unavailable(self):
+        source = self.root / "photo.heic"
+        output = self.root / "work" / "frame.jpg"
+        output.parent.mkdir(parents=True)
+        source.write_bytes(b"synthetic HEIC source")
+        looked_up: list[str] = []
+
+        def fake_which(name):
+            looked_up.append(name)
+            return "/fake/ffmpeg" if name == "ffmpeg" else None
+
+        def fake_scale(command, destination):
+            self.assertEqual(command[command.index("-i") + 1], str(source))
+            self.assertIn("scale=960:-2:force_original_aspect_ratio=decrease", command)
+            destination.write_bytes(b"verified scaled JPEG")
+            return True, "ok"
+
+        with (
+            patch.object(media_helpers.shutil, "which", side_effect=fake_which),
+            patch.object(media_helpers, "run_ffmpeg_output", side_effect=fake_scale),
+        ):
+            ok, _ = media_helpers.decode_heic_output(source, output)
+
+        self.assertTrue(ok)
+        self.assertEqual(looked_up, ["heif-convert", "ffmpeg"])
+        self.assertEqual(output.read_bytes(), b"verified scaled JPEG")
 
     def test_one_frame_contact_sheet_real_ffmpeg(self):
         ffmpeg = shutil.which("ffmpeg")
@@ -120,6 +147,46 @@ class CoreRegressions(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         rendered = json.loads((project / "work/render-input.json").read_text())
         self.assertEqual((rendered["width"], rendered["height"], rendered["ratio"]), (360, 640, "9:16"))
+
+    def test_prepare_render_converts_heic_photos_to_verified_jpeg_and_reuses_them(self):
+        project, plan = self.project_with_plan_inputs("heic-render")
+        source = project / "assets/photos/family.HEIC"
+        source.parent.mkdir(parents=True)
+        original_bytes = b"synthetic HEIC bytes"
+        source.write_bytes(original_bytes)
+        plan["timeline"].insert(
+            0,
+            {
+                "type": "photo",
+                "source": "assets/photos/family.HEIC",
+                "timeline_start": 0.0,
+                "timeline_end": 1.5,
+            },
+        )
+        self.write_json(project / "work/edit-plan/edit_plan.json", plan)
+
+        def fake_decode(input_path, output_path, *, max_dimension=960):
+            self.assertEqual(input_path, source.resolve())
+            self.assertEqual(max_dimension, 4096)
+            output_path.write_bytes(b"verified full-resolution JPEG")
+            return True, "ok"
+
+        with patch.object(media_helpers, "decode_heic_output", side_effect=fake_decode) as decoder:
+            result, _, stderr = self.run_cli("prepare-render", str(project))
+            self.assertEqual(result, 0, stderr)
+            first = json.loads((project / "work/render-input.json").read_text())
+            photo = first["timeline"][0]
+            self.assertEqual(photo["source_project_path"], "assets/photos/family.HEIC")
+            self.assertTrue(photo["source_url"].endswith("-heic-v2.jpg"))
+            render_jpeg = project / "work/render-public" / photo["source_url"]
+            self.assertTrue(render_jpeg.is_file())
+            self.assertEqual(render_jpeg.read_bytes(), b"verified full-resolution JPEG")
+            self.assertTrue(render_jpeg.with_suffix(".jpg.json").is_file())
+            self.assertEqual(source.read_bytes(), original_bytes)
+
+            result, _, stderr = self.run_cli("prepare-render", str(project))
+            self.assertEqual(result, 0, stderr)
+            self.assertEqual(decoder.call_count, 1)
 
     def test_rejects_silently_ignored_or_malformed_render_decisions(self):
         for changes in [

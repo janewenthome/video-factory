@@ -117,11 +117,13 @@ const MediaLayer: React.FC<{segment: Segment}> = ({segment}) => {
     scale: zoom,
   };
   if (!segment.source_url) return null;
+  const source = mediaUrl(segment.source_url);
+  const fit = crop?.fit ?? 'cover';
   return (
     <FadeLayer segment={segment}>
       {segment.type === 'video' ? (
         <Video
-          src={mediaUrl(segment.source_url)}
+          src={source}
           trimBefore={secondsToFrames(segment.source_in ?? 0, fps)}
           trimAfter={segment.source_out === undefined ? undefined : secondsToFrames(segment.source_out, fps)}
           volume={(localFrame) => audioVolume(segment, fps, localFrame)}
@@ -129,7 +131,24 @@ const MediaLayer: React.FC<{segment: Segment}> = ({segment}) => {
           style={style}
         />
       ) : (
-        <CanvasImage src={mediaUrl(segment.source_url)} style={{...style, objectFit: crop?.fit ?? 'cover'}} />
+        <>
+          {fit === 'contain' && (
+            <AbsoluteFill style={{overflow: 'hidden', backgroundColor: '#101820'}}>
+              <CanvasImage
+                src={source}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                  objectPosition: crop?.object_position ?? '50% 50%',
+                  scale: 1.12,
+                  filter: 'blur(24px) brightness(0.58)',
+                }}
+              />
+            </AbsoluteFill>
+          )}
+          <CanvasImage src={source} style={{...style, objectFit: fit}} />
+        </>
       )}
     </FadeLayer>
   );

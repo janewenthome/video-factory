@@ -110,56 +110,53 @@ def run_ffmpeg_output(args: list[str], output: Path, *, timeout: int = 900) -> t
     return True, detail
 
 
-def run_sips_output(source: Path, output: Path, *, max_dimension: int = 960) -> tuple[bool, str]:
+def decode_heic_output(source: Path, output: Path, *, max_dimension: int = 960) -> tuple[bool, str]:
     """Decode HEIC to a verified, scaled JPEG without touching the source.
 
-    Some tiled/multi-image HEIC files make ``sips`` return success while writing
-    an incomplete JPEG. Prefer libheif's converter when available, then ask
-    FFmpeg to decode and scale the intermediate. FFmpeg also acts as the final
-    decode check for the sips fallback.
+    Prefer libheif's converter when available. Otherwise decode the HEIC
+    directly with FFmpeg; macOS ``sips`` is intentionally not used because it
+    can report success while writing an incomplete or black JPEG for some files.
     """
     heif_convert = shutil.which("heif-convert")
-    sips = shutil.which("sips")
-    if not heif_convert and not sips:
-        return False, "neither heif-convert nor sips is installed or on PATH"
-    try:
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{output.stem}.heic-source.", suffix=".jpg", dir=output.parent
-        )
-        os.close(descriptor)
-    except OSError as exc:
-        return False, f"could not create a temporary output in {output.parent}: {exc}"
+    ffmpeg = require_ffmpeg()
+    temporary: str | None = None
     try:
         if heif_convert:
+            try:
+                descriptor, temporary = tempfile.mkstemp(
+                    prefix=f".{output.stem}.heic-source.", suffix=".jpg", dir=output.parent
+                )
+                os.close(descriptor)
+            except OSError as exc:
+                return False, f"could not create a temporary output in {output.parent}: {exc}"
             command = [heif_convert, "--quiet", str(source), temporary]
-            converter = "heif-convert"
+            converter_result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+            converted = Path(temporary)
+            if converter_result.returncode != 0 or not converted.is_file() or converted.stat().st_size == 0:
+                detail = converter_result.stderr.strip() or converter_result.stdout.strip() or "heif-convert produced no JPEG output"
+                return False, detail.splitlines()[-1]
+            decode_source = temporary
         else:
-            command = [sips, "-s", "format", "jpeg", str(source), "--out", temporary]
-            converter = "sips"
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
-        converted = Path(temporary)
-        if result.returncode != 0 or not converted.is_file() or converted.stat().st_size == 0:
-            detail = result.stderr.strip() or result.stdout.strip() or f"{converter} produced no JPEG output"
-            return False, detail.splitlines()[-1]
-
-        ffmpeg = require_ffmpeg()
+            decode_source = str(source)
         scaled = [
-            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", temporary,
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", decode_source,
             "-frames:v", "1", "-vf",
             f"scale={max_dimension}:-2:force_original_aspect_ratio=decrease",
             "-q:v", "2", str(output),
         ]
         ok, detail = run_ffmpeg_output(scaled, output)
         if not ok:
-            return False, f"{converter} output could not be decoded: {detail}"
+            prefix = "heif-convert output could not be decoded" if heif_convert else "FFmpeg could not decode the HEIC source"
+            return False, f"{prefix}: {detail}"
         return True, detail
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     finally:
-        try:
-            Path(temporary).unlink(missing_ok=True)
-        except OSError:
-            pass
+        if temporary:
+            try:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def load_cached_scenes(project: Path) -> dict[str, Any]:
@@ -390,7 +387,7 @@ def command_extract_frames(args: Any) -> int:
             if not is_within(output, project_path(project, "work/frames")):
                 raise UserFacingError(f"Frame output would escape work/frames/: {output}")
             if timestamp is None and source_path.suffix.lower() == ".heic":
-                ok, detail = run_sips_output(source_path, output)
+                ok, detail = decode_heic_output(source_path, output)
                 if not ok:
                     failures.append(f"{source}: HEIC decode failed: {detail}")
                     continue

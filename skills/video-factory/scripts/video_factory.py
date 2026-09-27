@@ -977,6 +977,78 @@ def copy_source_to_work(source: Path, output: Path, expected_hash: str) -> bool:
     return False
 
 
+def prepare_heic_render_asset(source: Path, output: Path, expected_source_hash: str) -> bool:
+    """Create or reuse a verified JPEG derivative for a HEIC render source."""
+    from media_helpers import decode_heic_output
+
+    conversion = "heic-decoder-verified-jpeg-v2"
+    max_dimension = 4096
+    metadata_path = output.with_suffix(output.suffix + ".json")
+    if sha256_file(source) != expected_source_hash:
+        raise UserFacingError(f"Source changed while preparing the HEIC render asset: {source}. Run inspect again.")
+
+    if os.path.lexists(output) or os.path.lexists(metadata_path):
+        if output.is_symlink() or metadata_path.is_symlink() or not output.is_file() or not metadata_path.is_file():
+            raise UserFacingError(f"Existing HEIC render cache is incomplete or unsafe; preserved: {output}")
+        metadata = load_json(metadata_path, "HEIC render cache metadata")
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("source_sha256") != expected_source_hash
+            or metadata.get("conversion") != conversion
+            or metadata.get("max_dimension") != max_dimension
+            or metadata.get("output_sha256") != sha256_file(output)
+        ):
+            raise UserFacingError(f"Existing HEIC render cache failed provenance verification; preserved: {output}")
+        return True
+
+    temporary_name: str | None = None
+    output_created = False
+    metadata_created = False
+    succeeded = False
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{output.stem}.", suffix=".jpg", dir=output.parent
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        ok, detail = decode_heic_output(source, temporary, max_dimension=max_dimension)
+        if not ok:
+            raise UserFacingError(f"Could not decode HEIC for Remotion: {source}: {detail}")
+        output_hash = sha256_file(temporary)
+        os.replace(temporary, output)
+        temporary_name = None
+        output_created = True
+        write_json(
+            metadata_path,
+            {
+                "source_sha256": expected_source_hash,
+                "output_sha256": output_hash,
+                "conversion": conversion,
+                "max_dimension": max_dimension,
+            },
+        )
+        metadata_created = True
+        succeeded = True
+    except UserFacingError:
+        raise
+    except OSError as exc:
+        raise UserFacingError(f"Could not prepare HEIC render asset {output}: {exc}") from exc
+    finally:
+        if temporary_name:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        if not succeeded:
+            for generated in (metadata_path if metadata_created else None, output if output_created else None):
+                if generated is not None:
+                    try:
+                        generated.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+    return False
+
+
 def command_prepare_render(args: argparse.Namespace) -> int:
     project = resolve_project(args.project)
     plan_path = project_path(project, PLAN_RELATIVE_PATH)
@@ -1025,10 +1097,16 @@ def command_prepare_render(args: argparse.Namespace) -> int:
             else:
                 current_hash = sha256_file(source_path)
             name = stable_asset_filename(relative_source, source_path, current_hash)
+            if segment.get("type") == "photo" and source_path.suffix.lower() == ".heic":
+                name = f"{Path(name).stem}-heic-v2.jpg"
             asset_path = public_assets / name
             if not is_within(asset_path, project_path(project, "work")):
                 raise UserFacingError(f"Render asset copy would escape work/: {asset_path}")
-            if copy_source_to_work(source_path, asset_path, current_hash):
+            if source_path.suffix.lower() == ".heic" and segment.get("type") == "photo":
+                cache_hit = prepare_heic_render_asset(source_path, asset_path, current_hash)
+            else:
+                cache_hit = copy_source_to_work(source_path, asset_path, current_hash)
+            if cache_hit:
                 cache_hits += 1
             else:
                 copies += 1
