@@ -14,6 +14,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -30,9 +31,11 @@ PROFILES_DIR = SKILL_DIR / "profiles"
 PLAN_RELATIVE_PATH = Path("work/edit-plan/edit_plan.json")
 MANIFEST_RELATIVE_PATH = Path("work/manifests/media_manifest.json")
 CACHE_RELATIVE_PATH = Path("work/manifests/.media_metadata_cache.json")
+PHOTO_METADATA_VERSION = 1
+PHOTO_METADATA_SUFFIXES = {".jpg", ".jpeg", ".heic", ".heif"}
 
 VIDEO_SUFFIXES = {".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".m2ts", ".webm"}
-IMAGE_SUFFIXES = {".avif", ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+IMAGE_SUFFIXES = {".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 AUDIO_SUFFIXES = {".aac", ".aif", ".aiff", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".wma"}
 KNOWN_SEGMENT_TYPES = {
     "photo", "video", "title", "text_card", "subtitle", "narration", "music",
@@ -338,6 +341,40 @@ def parse_exif_datetime(value: Any) -> str | None:
     return value
 
 
+def capture_time_record(value: Any, source: str) -> dict[str, Any] | None:
+    """Preserve the embedded timestamp source and timezone uncertainty."""
+    captured_at = parse_exif_datetime(value)
+    if not captured_at:
+        return None
+    parsed: dt.datetime | None = None
+    try:
+        parsed = dt.datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    timezone = None
+    if parsed is not None and parsed.utcoffset() is not None:
+        offset = parsed.strftime("%z")
+        timezone = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
+    uncertainty = (
+        "Timestamp includes an explicit timezone offset; camera clock accuracy and timestamp precision are not stated."
+        if timezone
+        else "The embedded timestamp has no timezone offset; retain it as camera-local time and do not convert it to UTC."
+        if parsed is not None
+        else "The original embedded timestamp is retained, but its format could not be normalized."
+    )
+    return {"value": captured_at, "timezone": timezone, "source": source, "uncertainty": uncertainty}
+
+
+def chronology_datetime(asset: dict[str, Any]) -> dt.datetime | None:
+    value = asset.get("captured_at")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def run_json_command(command: list[str], *, timeout: int = 60) -> dict[str, Any] | None:
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
@@ -372,6 +409,7 @@ def ffprobe_metadata(path: Path) -> dict[str, Any]:
         "audio_streams": [],
         "has_audio": bool(audio_streams),
         "captured_at": None,
+        "capture_time": None,
     }
     for stream in video_streams:
         tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
@@ -407,6 +445,7 @@ def ffprobe_metadata(path: Path) -> dict[str, Any]:
         for key in ("DateTimeOriginal", "creation_time", "date", "com.apple.quicktime.creationdate", "CreateDate"):
             if tags.get(key):
                 metadata["captured_at"] = parse_exif_datetime(tags[key])
+                metadata["capture_time"] = capture_time_record(tags[key], f"ffprobe tag: {key}")
                 break
         if metadata["captured_at"]:
             break
@@ -424,7 +463,18 @@ def ffprobe_metadata(path: Path) -> dict[str, Any]:
 
 
 def image_metadata(path: Path) -> dict[str, Any]:
-    result: dict[str, Any] = {"width": None, "height": None, "orientation": None, "captured_at": None, "metadata_sources": []}
+    result: dict[str, Any] = {
+        "width": None,
+        "height": None,
+        "orientation": None,
+        "captured_at": None,
+        "capture_time": None,
+        "gps": None,
+        "place_label": None,
+        "place_labels": {},
+        "photo_metadata_status": "not_supported",
+        "metadata_sources": [],
+    }
 
     exiftool = shutil.which("exiftool")
     if exiftool:
@@ -485,6 +535,28 @@ def image_metadata(path: Path) -> dict[str, Any]:
             result["orientation"] = "portrait" if result["orientation"] in {5, 6, 7, 8} else "landscape" if result["orientation"] in {1, 2, 3, 4} else str(result["orientation"])
         elif not result["orientation"]:
             result["orientation"] = "landscape" if result["width"] >= result["height"] else "portrait"
+
+    if path.suffix.lower() in PHOTO_METADATA_SUFFIXES:
+        project_root = Path(__file__).resolve().parents[3]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        try:
+            from video_editor.photo_metadata import read_photo_metadata
+
+            photo_metadata = read_photo_metadata(path)
+            result["photo_metadata_status"] = photo_metadata.get("status", "unavailable")
+            result["photo_metadata"] = photo_metadata
+            result["metadata_sources"] = sorted(set(result["metadata_sources"] + photo_metadata.get("metadata_sources", [])))
+            result["width"] = result["width"] or photo_metadata.get("width")
+            result["height"] = result["height"] or photo_metadata.get("height")
+            if photo_metadata.get("captured_at"):
+                result["captured_at"] = photo_metadata["captured_at"]
+                result["capture_time"] = photo_metadata.get("capture_time")
+            result["gps"] = photo_metadata.get("gps")
+            result["place_label"] = photo_metadata.get("place_label")
+            result["place_labels"] = photo_metadata.get("place_labels", {})
+        except (ImportError, OSError, ValueError):
+            result["photo_metadata_status"] = "unavailable"
     return result
 
 
@@ -529,15 +601,27 @@ def command_inspect(args: argparse.Namespace) -> int:
             errors.append(f"{source}: {exc}")
             continue
         cache_record = cache_entries.get(digest)
+        suffix = path.suffix.lower()
+        cached_metadata = cache_record.get("metadata") if isinstance(cache_record, dict) else None
+        photo_metadata_current = (
+            suffix not in PHOTO_METADATA_SUFFIXES
+            or (
+                isinstance(cache_record, dict)
+                and cache_record.get("photo_metadata_version") == PHOTO_METADATA_VERSION
+                and cache_record.get("photo_metadata_runtime") == platform.mac_ver()[0]
+                and isinstance(cached_metadata, dict)
+                and cached_metadata.get("photo_metadata_status") not in {"unavailable", "unsupported"}
+            )
+        )
         reused = (
             isinstance(cache_record, dict)
             and isinstance(cache_record.get("metadata"), dict)
             and not cache_record["metadata"].get("probe_error")
+            and photo_metadata_current
         )
         if reused:
             metadata = dict(cache_record["metadata"])
         else:
-            suffix = path.suffix.lower()
             if suffix in IMAGE_SUFFIXES:
                 metadata = image_metadata(path)
                 probe = shutil.which("ffprobe")
@@ -546,8 +630,12 @@ def command_inspect(args: argparse.Namespace) -> int:
                     streams = probe_result.get("streams", []) if probe_result else []
                     if probe_result and isinstance(probe_result.get("format"), dict):
                         tags = probe_result["format"].get("tags", {})
-                        if isinstance(tags, dict):
-                            metadata["captured_at"] = next((parse_exif_datetime(tags[key]) for key in ("DateTimeOriginal", "creation_time", "date", "CreateDate") if tags.get(key)), metadata.get("captured_at"))
+                        if isinstance(tags, dict) and not metadata.get("captured_at"):
+                            for key in ("DateTimeOriginal", "creation_time", "date", "CreateDate"):
+                                if tags.get(key):
+                                    metadata["captured_at"] = parse_exif_datetime(tags[key])
+                                    metadata["capture_time"] = capture_time_record(tags[key], f"ffprobe tag: {key}")
+                                    break
                     if isinstance(streams, list):
                         metadata["has_audio"] = any(isinstance(stream, dict) and stream.get("codec_type") == "audio" for stream in streams)
                         if not metadata.get("width"):
@@ -567,8 +655,26 @@ def command_inspect(args: argparse.Namespace) -> int:
             else:
                 metadata = {"video_streams": [], "audio_streams": [], "has_audio": None}
             if not metadata.get("probe_error"):
-                new_cache[digest] = {"metadata": metadata, "cached_at": utc_now()}
+                new_cache[digest] = {
+                    "metadata": metadata,
+                    "cached_at": utc_now(),
+                    **(
+                        {"photo_metadata_version": PHOTO_METADATA_VERSION}
+                        if suffix in PHOTO_METADATA_SUFFIXES and metadata.get("photo_metadata_status") not in {"unavailable", "unsupported"}
+                        else {}
+                    ),
+                    **(
+                        {"photo_metadata_runtime": platform.mac_ver()[0]}
+                        if suffix in PHOTO_METADATA_SUFFIXES and metadata.get("photo_metadata_status") not in {"unavailable", "unsupported"}
+                        else {}
+                    ),
+                }
 
+        if metadata.get("captured_at") and not metadata.get("capture_time"):
+            metadata["capture_time"] = capture_time_record(
+                metadata.get("captured_at"),
+                ", ".join(metadata.get("metadata_sources", [])) or "embedded media metadata",
+            )
         suffix = path.suffix.lower()
         kind = "photo" if suffix in IMAGE_SUFFIXES else "video" if suffix in VIDEO_SUFFIXES else "audio" if suffix in AUDIO_SUFFIXES else "other"
         try:
@@ -590,14 +696,61 @@ def command_inspect(args: argparse.Namespace) -> int:
         }
         if record.get("width") is not None and record.get("height") is not None:
             record["resolution"] = {"width": record["width"], "height": record["height"]}
-        record["metadata_status"] = "error" if record.get("probe_error") else "ok" if any(record.get(key) is not None for key in ("duration_seconds", "width", "height", "captured_at")) else "partial"
+        gps = record.get("gps")
+        gps_available = isinstance(gps, dict) and gps.get("latitude") is not None and gps.get("longitude") is not None
+        record["metadata_status"] = "error" if record.get("probe_error") else "ok" if gps_available or any(record.get(key) is not None for key in ("duration_seconds", "width", "height", "captured_at")) else "partial"
         assets.append(record)
         if reused:
-            new_cache[digest] = cache_record
+            new_cache[digest] = {**cache_record, "metadata": metadata}
+
+    parsed_times = [chronology_datetime(asset) for asset in assets]
+    known_times = [item for item in parsed_times if item is not None]
+    aware_count = sum(item.utcoffset() is not None for item in known_times)
+    naive_count = len(known_times) - aware_count
+    all_offsets_known = bool(known_times) and aware_count == len(known_times)
+
+    def chronology_key(item: dict[str, Any]) -> tuple[int, Any, str]:
+        captured = chronology_datetime(item)
+        if captured is None:
+            return (1, "", str(item.get("source", "")))
+        if all_offsets_known:
+            return (0, captured.timestamp(), str(item.get("source", "")))
+        # Mixed/offset-free EXIF timestamps are ordered by their recorded
+        # camera wall time; the timezone uncertainty is kept in each record.
+        return (0, captured.replace(tzinfo=None).isoformat(timespec="microseconds"), str(item.get("source", "")))
+
+    assets.sort(key=chronology_key)
+    untimed_assets: list[str] = []
+    for index, asset in enumerate(assets, start=1):
+        captured = chronology_datetime(asset)
+        capture_time = asset.get("capture_time") if isinstance(asset.get("capture_time"), dict) else {}
+        if captured is None:
+            confidence = "unknown"
+            if asset.get("source"):
+                untimed_assets.append(str(asset["source"]))
+        elif captured.utcoffset() is None:
+            confidence = "approximate"
+        else:
+            confidence = "high"
+        asset["chronology"] = {
+            "index": index,
+            "basis": "embedded_capture_time" if captured is not None else "source_path_fallback",
+            "confidence": confidence,
+            "capture_time_source": capture_time.get("source"),
+            "timezone": capture_time.get("timezone"),
+        }
 
     manifest = {
         "manifest_version": 1,
         "generated_at": utc_now(),
+        "chronology": {
+            "ordered_by": "embedded capture time; source path breaks ties and orders assets without parseable timestamps",
+            "timezone_policy": "explicit offsets are normalized only when every timestamp has an offset; otherwise recorded wall-clock times are compared without inferring a timezone",
+            "confidence": "high" if all_offsets_known else "approximate" if known_times else "unknown",
+            "timestamped_assets": len(known_times),
+            "untimed_assets": untimed_assets,
+            "mixed_timezone_or_unknown_offset": bool(aware_count and naive_count) or bool(naive_count),
+        },
         "assets": assets,
         "errors": errors,
     }
@@ -1097,12 +1250,13 @@ def command_prepare_render(args: argparse.Namespace) -> int:
             else:
                 current_hash = sha256_file(source_path)
             name = stable_asset_filename(relative_source, source_path, current_hash)
-            if segment.get("type") == "photo" and source_path.suffix.lower() == ".heic":
-                name = f"{Path(name).stem}-heic-v2.jpg"
+            is_heif = source_path.suffix.lower() in {".heic", ".heif"}
+            if segment.get("type") == "photo" and is_heif:
+                name = f"{Path(name).stem}-heif-v2.jpg"
             asset_path = public_assets / name
             if not is_within(asset_path, project_path(project, "work")):
                 raise UserFacingError(f"Render asset copy would escape work/: {asset_path}")
-            if source_path.suffix.lower() == ".heic" and segment.get("type") == "photo":
+            if is_heif and segment.get("type") == "photo":
                 cache_hit = prepare_heic_render_asset(source_path, asset_path, current_hash)
             else:
                 cache_hit = copy_source_to_work(source_path, asset_path, current_hash)

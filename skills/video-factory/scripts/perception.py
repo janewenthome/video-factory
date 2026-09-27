@@ -13,10 +13,18 @@ import argparse
 import hashlib
 import json
 import math
+import platform
+import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from video_editor.image_text import recognize_image_text
 
 try:
     from product_policy import GPU_POLICIES, PRIVACY_MODES, load_product_policy
@@ -38,6 +46,13 @@ from video_factory import (
 
 INDEX_SCHEMA_VERSION = "perception-index.v1"
 WORKER_VERSION = "colab-perception.v4"
+IMAGE_TEXT_ENGINE_VERSION = "apple-vision-local.v1"
+IMAGE_TEXT_PARAMETERS = {
+    "recognition_level": "accurate",
+    "languages": ["zh-Hant", "zh-Hans", "en-US", "ja-JP"],
+    "language_correction": True,
+    "editorial_review_required": True,
+}
 SPEECH_MODEL = "large-v3-turbo"
 SPEECH_ENGINE_VERSION = "faster-whisper-1.2.1"
 SPEECH_MODEL_REPO = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
@@ -127,6 +142,87 @@ def _manifest_sources(project: Path) -> list[dict[str, Any]]:
     return [item for item in value.get("assets", []) if isinstance(item, dict) and item.get("source")]
 
 
+def _photo_records(manifest_assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for item in manifest_assets:
+        if item.get("kind") != "photo" or not isinstance(item.get("sha256"), str):
+            continue
+        records.append({
+            "id": f"photo-{_json_hash({'source': item['source'], 'sha256': item['sha256']})[:16]}",
+            "kind": "photo",
+            "source": item["source"],
+            "path": item["source"],
+            "sha256": item["sha256"],
+            "captured_at": item.get("captured_at"),
+            "capture_time": item.get("capture_time"),
+            "gps": item.get("gps"),
+            "place_label": item.get("place_label"),
+            "place_labels": item.get("place_labels", {}),
+            "chronology": item.get("chronology"),
+            "metadata_status": item.get("photo_metadata_status", item.get("metadata_status")),
+        })
+    return records
+
+
+def _image_text_cache_key(sha256: str) -> str:
+    return _json_hash({
+        "source_sha256": sha256,
+        "engine": IMAGE_TEXT_ENGINE_VERSION,
+        "runtime": {"platform": platform.system(), "macos": platform.mac_ver()[0]},
+        "parameters": IMAGE_TEXT_PARAMETERS,
+    })
+
+
+def _recognize_image_text(project: Path, target: dict[str, Any]) -> dict[str, Any]:
+    resolved = _relative_file(project, target["path"])
+    if resolved is None:
+        return {**target, "ocr": {"status": "error", "reason": "image_path_unavailable", "items": []}}
+    _, image_path = resolved
+    try:
+        current_sha256 = sha256_file(image_path)
+    except UserFacingError:
+        return {**target, "ocr": {"status": "error", "reason": "image_read_failed", "items": []}}
+    if current_sha256 != target["sha256"]:
+        return {**target, "ocr": {"status": "error", "reason": "source_changed_since_inspection", "items": []}}
+    cache_key = _image_text_cache_key(str(target["sha256"]))
+    cache_dir = work_path(project, Path("perception-cache/image-text"), create_dir=True)
+    cache_path = cache_dir / f"{cache_key}.json"
+    cached = _read_json_if(cache_path)
+    if isinstance(cached, dict) and cached.get("cache_key") == cache_key and isinstance(cached.get("result"), dict):
+        result = cached["result"]
+    else:
+        result = recognize_image_text(image_path)
+        # Cache only a completed local result. An unavailable runtime should
+        # be retried if the user later runs this on a supported Mac.
+        if result.get("status") == "completed":
+            write_json(cache_path, {"cache_key": cache_key, "result": result})
+    return {**target, "ocr": result}
+
+
+def _image_text_records(
+    project: Path,
+    photos: list[dict[str, Any]],
+    frames: list[dict[str, Any]],
+    manifest_assets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    targets = list(photos)
+    by_source = {str(item.get("source")): item for item in manifest_assets if item.get("source")}
+    for frame in frames:
+        source_metadata = by_source.get(str(frame.get("source")), {})
+        targets.append({
+            "id": frame["id"],
+            "kind": "video_frame",
+            "source": frame["source"],
+            "path": frame["path"],
+            "sha256": frame["sha256"],
+            "timestamp_seconds": frame.get("timestamp_seconds"),
+            "source_captured_at": source_metadata.get("captured_at"),
+            "source_capture_time": source_metadata.get("capture_time"),
+            "chronology": source_metadata.get("chronology"),
+        })
+    return [_recognize_image_text(project, item) for item in targets]
+
+
 def _transcript_records(project: Path) -> list[dict[str, Any]]:
     root = project / "work" / "transcripts"
     records: list[dict[str, Any]] = []
@@ -141,15 +237,35 @@ def _transcript_records(project: Path) -> list[dict[str, Any]]:
         if not isinstance(segments, list):
             continue
         request = value.get("request") if isinstance(value.get("request"), dict) else {}
+        normalized_segments = []
+        for item in segments:
+            if not isinstance(item, dict):
+                continue
+            segment_record = {
+                key: item.get(key)
+                for key in ("start", "end", "text", "speaker", "speaker_id", "speech_probability")
+                if key in item
+            }
+            for key in ("avg_logprob", "no_speech_prob", "temperature", "compression_ratio"):
+                value = item.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+                    segment_record[key] = value
+            words = item.get("words")
+            if isinstance(words, list):
+                segment_record["words"] = [
+                    {key: word.get(key) for key in ("id", "start", "end", "text", "word", "probability", "speaker", "speaker_id") if key in word}
+                    for word in words if isinstance(word, dict)
+                ]
+            normalized_segments.append(segment_record)
         records.append({
             "cache_file": path.relative_to(project).as_posix(),
             "source": request.get("source"),
             "source_sha256": request.get("source_sha256"),
             "model": request.get("model") or request.get("engine"),
-            "segments": [
-                {"start": item.get("start"), "end": item.get("end"), "text": item.get("text", "")}
-                for item in segments if isinstance(item, dict)
-            ],
+            "language": response.get("language"),
+            "segments": normalized_segments,
+            "review_status": "pending_editorial_review",
+            "review_guidance": "ASR text and scores are evidence, not verified speech. Check retained audio; do not correct, paraphrase, or infer missing words.",
         })
     return records
 
@@ -420,11 +536,21 @@ def build_perception_index(
 
     manifest_assets = _manifest_sources(project)
     frames = _frame_records(project)
+    photos = _photo_records(manifest_assets)
+    image_text_items = _image_text_records(project, photos, frames, manifest_assets)
     transcripts = _transcript_records(project)
     audio_candidates = _audio_upload_candidates(project)
+    manifest_value = _read_json_if(project_path(project, MANIFEST_RELATIVE_PATH))
+    chronology = manifest_value.get("chronology", {}) if isinstance(manifest_value, dict) else {}
     fingerprint = {
         "manifest": [{"source": item.get("source"), "sha256": item.get("sha256")} for item in manifest_assets],
         "frames": [{"path": item["path"], "sha256": item["sha256"]} for item in frames],
+        "photos": [{"path": item["path"], "sha256": item["sha256"]} for item in photos],
+        "image_text": {
+            "engine": IMAGE_TEXT_ENGINE_VERSION,
+            "runtime": {"platform": platform.system(), "macos": platform.mac_ver()[0], "swift_available": bool(shutil.which("swift"))},
+            "parameters": IMAGE_TEXT_PARAMETERS,
+        },
         "audio": audio_candidates,
         "transcripts": transcripts,
         "privacy_mode": policy.privacy_mode,
@@ -494,6 +620,18 @@ def build_perception_index(
             "similarity": None,
             "confidence": 0.0,
         })
+    image_text_statuses = [
+        item.get("ocr", {}).get("status")
+        for item in image_text_items
+        if isinstance(item.get("ocr"), dict)
+    ]
+    completed_image_text = sum(status == "completed" for status in image_text_statuses)
+    image_text_status = (
+        "not_applicable" if not image_text_items
+        else "completed" if completed_image_text == len(image_text_items)
+        else "partial" if completed_image_text
+        else "pending"
+    )
     cache_key = _json_hash(fingerprint)
     cache_path = _cache_path(project, cache_key)
     canonical_path = work_path(project, "perception_index.json", create_dir=False)
@@ -576,6 +714,17 @@ def build_perception_index(
         "schema_version": INDEX_SCHEMA_VERSION,
         "created_at": utc_now(),
         "cache_key": cache_key,
+        "chronology": {
+            **(chronology if isinstance(chronology, dict) else {}),
+            "editorial_guidance": "Use embedded capture timestamps as ordering evidence, retain timezone uncertainty, and verify apparent event progression against images, video-frame timing, speech, and user context. Story order may depart from chronology when the edit has a supported reason.",
+        },
+        "images": {
+            "items": image_text_items,
+            "text_recognition_status": image_text_status,
+            "processing": "local Apple Vision OCR and embedded metadata only",
+            "source_media_uploaded": False,
+            "editorial_guidance": "OCR is literal visible-text evidence, not a subtitle or an approved claim. Create a short annotation only when supported by image content, transcript, reliable time/place metadata, or user context; otherwise omit it or flag review. Never invent identities, events, translations, or precise place names.",
+        },
         "privacy": {
             "mode": policy.privacy_mode,
             "original_media_uploaded": False,
@@ -668,12 +817,33 @@ def build_perception_index(
             "event_groups": [],
         },
         "editorial": {
+            "annotation_candidates": [],
+            "annotation_status": "awaiting_editorial_director",
+            "annotation_review_contract": "Draft evidence-linked candidates in work/analysis/asset-analysis.json; keep them pending until explicit review, and never render precise GPS, unverified OCR, or invented context.",
             "candidate_signals": [
                 {"frame_id": item["id"], "signals": ["representative_frame", "visual_cluster"], "keep_decision": None, "confidence": 0.0}
                 for item in visual_items
+            ] + [
+                {
+                    "image_id": item["id"],
+                    "source": item["source"],
+                    "signals": [
+                        signal for signal, present in (
+                            ("photo", item.get("kind") == "photo"),
+                            ("video_frame", item.get("kind") == "video_frame"),
+                            ("capture_time", bool(item.get("captured_at") or item.get("source_captured_at"))),
+                            ("gps", bool((item.get("gps") or {}).get("latitude") is not None and (item.get("gps") or {}).get("longitude") is not None)),
+                            ("visible_text", bool((item.get("ocr") or {}).get("items"))),
+                        ) if present
+                    ],
+                    "keep_decision": None,
+                    "text_annotation_status": "pending_editorial_review",
+                    "confidence": 0.0,
+                }
+                for item in image_text_items
             ],
             "director": "Antigravity/Gemini",
-            "decision_boundary": "Perception supplies evidence and candidates; it does not select the final story.",
+            "decision_boundary": "Perception supplies evidence and candidates; it does not select the final story or approve annotations/captions.",
         },
     }
     write_json(cache_path, index)

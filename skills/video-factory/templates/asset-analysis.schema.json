@@ -28,6 +28,68 @@
           "clarity_score": {"$ref": "#/$defs/score"},
           "teaching_value_score": {"$ref": "#/$defs/score"},
           "captured_at": {"type": ["string", "null"]},
+          "capture_time": {
+            "type": ["object", "null"],
+            "properties": {
+              "value": {"type": ["string", "null"]},
+              "timezone": {"type": ["string", "null"]},
+              "source": {"type": ["string", "null"]},
+              "uncertainty": {"type": ["string", "null"]}
+            },
+            "additionalProperties": true
+          },
+          "gps": {
+            "type": ["object", "null"],
+            "properties": {
+              "latitude": {"type": ["number", "null"], "minimum": -90, "maximum": 90},
+              "longitude": {"type": ["number", "null"], "minimum": -180, "maximum": 180},
+              "accuracy_m": {"type": ["number", "null"], "minimum": 0},
+              "source": {"type": ["string", "null"]},
+              "uncertainty": {"type": ["string", "null"]}
+            },
+            "additionalProperties": true
+          },
+          "place_label": {"type": ["string", "null"]},
+          "chronology": {
+            "type": ["object", "null"],
+            "properties": {
+              "index": {"type": "integer", "minimum": 1},
+              "basis": {"type": "string"},
+              "confidence": {"enum": ["high", "approximate", "unknown", "low"]},
+              "capture_time_source": {"type": ["string", "null"]},
+              "timezone": {"type": ["string", "null"]}
+            },
+            "additionalProperties": true
+          },
+          "visible_text": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["text"],
+              "properties": {
+                "text": {"type": "string"},
+                "language": {"type": ["string", "null"]},
+                "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                "bounding_box": {"type": ["object", "null"]},
+                "source_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}
+              },
+              "additionalProperties": true
+            }
+          },
+          "text_annotation_candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["text", "evidence", "review_status"],
+              "properties": {
+                "text": {"type": "string"},
+                "evidence": {"type": "array", "items": {"type": "string"}},
+                "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                "review_status": {"enum": ["pending", "approved", "rejected"]}
+              },
+              "additionalProperties": true
+            }
+          },
           "orientation": {"type": ["string", "null"]},
           "duplicate_cluster": {"type": ["string", "null"]},
           "summary": {"type": "string"},

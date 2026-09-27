@@ -89,9 +89,9 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 ## 系統如何製作影片
 
 
-1. 本機 Python 和 ffprobe 盤點每個檔案、計算 SHA-256，並快取 metadata。
+1. 本機 Python 和 ffprobe 盤點每個檔案、計算 SHA-256，並快取 metadata。JPEG/HEIC/HEIF 另外由 Apple ImageIO 讀 EXIF 拍攝時間、時區、GPS 和 IPTC 內嵌地名；manifest 依可解析的拍攝時間排序，時區缺失會標成 approximate。
 2. FFmpeg/VideoToolbox 產生場景候選、proxy、代表影格、接觸表與抽取音訊；素材本身保持不變。
-3. 建立 `work/perception_index.json`，只記錄本機可取得的 metadata 與推論證據；缺少的元件標記為 pending/not configured。
+3. 建立 `work/perception_index.json`，加入照片／代表影格的本機 Apple Vision OCR、拍攝時間與 GPS 證據、語音逐字稿及信心訊號；缺少的元件標記為 pending/not configured。OCR 文字不是字幕或核准文案，GPS 不做外部反查。
 4. Antigravity/Gemini 導演依 profile、transcript、perception evidence 與素材資料決定故事、片段、節奏和情緒走向；Codex 將核定方向寫成 `story_plan.json`、`edit_plan.json` 並驗證。
 5. 依已確認的 edit plan，對保留且含語音的片段執行本機轉錄，再將時間戳映射到輸出時間軸；指定導演模型或使用者判斷字幕是否有意義，Codex 記錄 keep/drop。只省略被判定無意義的字幕，不改寫或編造語音。
 6. 驗證器檢查素材路徑、時間範圍、公衛 claim references 與字幕 cue；Codex 協調和審閱結果。
@@ -117,7 +117,7 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 
 | 功能 | 執行位置 | 備註 |
 |---|---|---|
-| metadata、SHA-256 cache、proxy、scene detection、frames/contact sheets、speech transcription | Mac mini M4 | 本機執行；已驗證 MLX Whisper 在一台 Apple Silicon 環境對短剪輯做 live inference；每個專案仍需人工檢查辨識內容；不自動上傳 |
+| EXIF/GPS、metadata chronology、SHA-256 cache、proxy、scene detection、frames/contact sheets、Apple Vision OCR、speech transcription | Mac mini M4 | 照片時間／GPS與圖片文字留在本機；字幕候選保留 Whisper 信心訊號並須聽音審閱；不自動上傳 |
 | 故事／剪輯決策 | Antigravity/Gemini 導演 | Codex 將核定方向落成 edit plan；perception 分數只作線索 |
 | 字幕語意審閱 | 指定導演模型／使用者；Codex 記錄決定 | 有意義內容保留，無意義 cue 可省略，不改寫原話 |
 | Remotion render、FFmpeg、SRT 匯出與 QA | Mac M4 | 最終編碼不使用 Colab GPU |
@@ -127,6 +127,8 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 | TTS 旁白 | 尚未接入 | 旁白預設不加入；起始訪談不詢問旁白需求，只有使用者提出時才討論 |
 
 Apple Silicon local Whisper supports cut-first transcription and word-level timestamps. A live run on one M4 processed a few short retained clips using an already-cached MLX Whisper large-v3 snapshot; this is not a general speed or accuracy benchmark. Recording conditions and model version affect transcription quality, so review every candidate. The existing SigLIP2, anonymous speaker and temporal adapters have not completed live Colab inference or GPU/CU benchmarks and are not used by the current workflow. Audio event detection and speech-importance scoring remain unconfigured. Local-only mode supports asset inventory, local perception evidence, story/edit planning, Remotion rendering, SRT export and technical QA. OpenAI keys must only be supplied via `OPENAI_API_KEY`; `.env.example` contains no real key. TTS is not connected.
+
+The local EXIF/GPS and Apple Vision OCR path is now wired into inspection and perception, but this revision was validated statically rather than against a real JPEG/HEIC file. Confirm its metadata/OCR output during the next local project run before treating a particular photo's time, location or visible text as verified.
 
 `music-library/manifest.yaml` 只列出使用者擁有或明確有權使用的本機曲目。Openverse 自動選曲的授權來源與 credits 必須一併記錄。
 

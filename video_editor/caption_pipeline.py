@@ -122,6 +122,92 @@ def _audio_cut(project: Path, segment: dict[str, Any]) -> tuple[str, str]:
     return relative_output, key
 
 
+_ASR_SEGMENT_SIGNALS = ("avg_logprob", "no_speech_prob", "temperature", "compression_ratio")
+
+
+def _transcription_quality_by_word(response: dict[str, Any], clip_id: str) -> dict[str, dict[str, Any]]:
+    """Keep MLX confidence signals available to the later caption reviewer.
+
+    The subtitle helper assigns synthetic word IDs by flattening Whisper's
+    words (or, when word timestamps are absent, its timestamped segments).
+    Mirror that ordering here so quality signals remain attached to the exact
+    spoken evidence without changing its recognized text or timing.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    segments = response.get("segments")
+    if not isinstance(segments, list):
+        return result
+
+    ordinal = 0
+    for segment_index, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            continue
+        segment_signals = {
+            key: segment[key]
+            for key in _ASR_SEGMENT_SIGNALS
+            if isinstance(segment.get(key), (int, float))
+            and not isinstance(segment.get(key), bool)
+            and math.isfinite(float(segment[key]))
+        }
+        words = segment.get("words")
+        if isinstance(words, list):
+            entries = [word for word in words if isinstance(word, dict)]
+        elif segment.get("text"):
+            entries = [segment]
+        else:
+            entries = []
+
+        for entry in entries:
+            ordinal += 1
+            evidence: dict[str, Any] = {
+                "segment_index": segment_index,
+                "segment_signals": segment_signals,
+            }
+            probability = entry.get("probability")
+            if isinstance(probability, (int, float)) and not isinstance(probability, bool) and math.isfinite(float(probability)):
+                evidence["word_probability"] = float(probability)
+            result[f"{clip_id}:word-{ordinal:04d}"] = evidence
+            explicit_id = entry.get("id")
+            if explicit_id is not None:
+                result[str(explicit_id)] = evidence
+    return result
+
+
+def _attach_asr_quality(
+    candidates: list[dict[str, Any]],
+    quality_by_clip: dict[str, dict[str, dict[str, Any]]],
+) -> None:
+    """Attach raw recognition quality evidence without auto-deciding a cue."""
+    for candidate in candidates:
+        clip_id = candidate.get("source_clip_id")
+        clip_quality = quality_by_clip.get(str(clip_id), {})
+        word_ids = candidate.get("word_ids", [])
+        evidence = [clip_quality[word_id] for word_id in word_ids if isinstance(word_id, str) and word_id in clip_quality]
+        probabilities = [item["word_probability"] for item in evidence if "word_probability" in item]
+
+        unique_segments: dict[int, dict[str, Any]] = {}
+        for item in evidence:
+            signals = item.get("segment_signals")
+            segment_index = item.get("segment_index")
+            if isinstance(signals, dict) and isinstance(segment_index, int) and signals:
+                unique_segments[segment_index] = signals
+
+        candidate["asr_confidence"] = {
+            "available": bool(probabilities or unique_segments),
+            "word_probability_count": len(probabilities),
+            "word_probability_min": min(probabilities) if probabilities else None,
+            "word_probability_mean": round(sum(probabilities) / len(probabilities), 4) if probabilities else None,
+            "segment_signals": [
+                {"segment_index": index, **unique_segments[index]}
+                for index in sorted(unique_segments)
+            ],
+            "review_guidance": (
+                "Treat model scores as review signals only. Verify uncertain speech against retained audio; "
+                "keep the cue pending until verified or drop it. Never rewrite or paraphrase recognized speech."
+            ),
+        }
+
+
 def draft_selected_caption_candidates(
     project_value: str | Path,
     *,
@@ -140,6 +226,7 @@ def draft_selected_caption_candidates(
 
     plan_sha256 = video_factory.sha256_file(plan_path)
     transcript_by_clip: dict[str, dict[str, Any]] = {}
+    quality_by_clip: dict[str, dict[str, dict[str, Any]]] = {}
     transcription_records: list[dict[str, Any]] = []
     timeline = plan.get("timeline", [])
     selected = [
@@ -176,6 +263,7 @@ def draft_selected_caption_candidates(
             local_files_only=local_files_only,
         )
         transcript_by_clip[clip_id] = response
+        quality_by_clip[clip_id] = _transcription_quality_by_word(response, clip_id)
         transcription_records.append({
             "clip_id": clip_id,
             "source": segment["source"],
@@ -192,6 +280,7 @@ def draft_selected_caption_candidates(
         })
 
     candidates = generate_subtitle_candidates(plan, transcript_by_clip, timestamp_reference="clip")
+    _attach_asr_quality(candidates, quality_by_clip)
     cue_errors = validate_subtitle_cues(candidates, duration_seconds=plan.get("duration_seconds"))
     if cue_errors:
         raise video_factory.UserFacingError("Generated caption candidates failed timing validation: " + "; ".join(cue_errors))
@@ -218,7 +307,8 @@ def draft_selected_caption_candidates(
             "decisions_key": "candidate id (or explicit phrase:/word: key)",
             "unreviewed_candidates": "must remain pending; do not apply",
             "drop_only_if": "ASR is hallucinated, unintelligible, pure filler, unrelated background speech, or otherwise meaningless",
-            "preserve": "meaningful spoken words without inventing or paraphrasing their content",
+            "low_confidence": "leave pending until verified against retained audio; drop if the words cannot be verified",
+            "preserve": "meaningful spoken words exactly as recognized, without inventing, correcting, or paraphrasing their content",
         },
     }
     video_factory.work_path(project, "transcripts", create_dir=True)

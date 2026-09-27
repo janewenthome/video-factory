@@ -16,8 +16,9 @@ Codex ── 導演決策轉成 edit plan、驗證並協調本機執行
         ▼
 Mac mini M4
   ├─ manifest、hash cache、metadata
+  ├─ EXIF/IPTC capture time、timezone、GPS、asset chronology
   ├─ FFmpeg / VideoToolbox proxies、scene samples、audio extraction
-  ├─ local perception 與支援 Apple Silicon 時的 MLX Whisper transcription
+  ├─ Apple Vision OCR on photos/representative frames、支援時的 MLX Whisper
   ├─ timestamp 對齊、SRT 驗證
   └─ Remotion render、FFmpeg QA、final encoding
         │
@@ -45,6 +46,8 @@ Mac mini M4
 ### Mac mini M4
 
 - 原始照片與影片留在本機；所有衍生物存於 project `work/` 或 `outputs/`。
+- JPEG/HEIC/HEIF 的 EXIF 拍攝時間、時區、GPS 與 IPTC 地名由本機 ImageIO 讀取。Manifest 依嵌入的拍攝時間建立排序；沒有時區的時間保留為相機當地時間並標為 approximate。GPS 不做網路反向地理編碼，精確座標只留在私有 project metadata。
+- `perception_index.json` 對照片與影片代表影格執行本機 Apple Vision OCR，保留文字、框座標、語言、辨識信心和來源雜湊。OCR 只是可見文字證據，不會直接變成字幕或事實註記。
 - 執行檔案雜湊、metadata、proxy、scene sampling、representative frames、音訊擷取等確定性工作。
 - 在已配置且相容的 Apple Silicon 環境以 MLX Whisper 執行本機轉錄。本專案已在一台 M4 上對少量真實保留音訊完成 live inference；這只證明該環境與快取模型可執行，不是通用效能或辨識品質 benchmark。可指定既有模型 revision，並以 `--local-only` 禁止下載。
 - 依 edit plan 做 Remotion 合成、字幕、配樂 ducking、FFmpeg/VideoToolbox 輸出與技術 QA。
@@ -65,6 +68,15 @@ Mac mini M4
 3. 將來源時間戳按 source in/out 映射至最終時間軸，切分長句並避免 cue 重疊。
 4. 指定導演模型或人工檢查內容是否有語意價值；Codex 記錄 keep/drop。被判定無意義的段落不放字幕；保留原始 transcript 證據，讓排除可追溯。低信心或不確定內容標為 review，不臆測。
 5. 驗證 SRT 時間範圍、排序、重疊與輸出長度，再由 Mac renderer 燒錄。
+
+字幕候選保留可用的 Whisper word probability 與 segment quality fields（`avg_logprob`、`no_speech_prob`、`temperature`、`compression_ratio`）。這些訊號未校準，不設自動保留門檻；Codex/導演須把內容與保留音訊核對。圖片 OCR 與語音 ASR 分別保留，不互相改寫。
+
+## 照片理解、時間序與文字註解
+
+- 優先以嵌入式拍攝時間排序；檔案路徑只在時間相同或時間未知時作穩定排序依據。禁止把檔案修改時間當成拍攝時間。
+- 將拍攝時間、影片內 frame offset、場景變化、OCR、已審閱語音和使用者描述合併作為事件進展證據。時間只提供順序假設，導演仍負責確認事件與故事順序。
+- 只在證據足夠時提出簡短註解候選。註解應能回指圖像、語音、時間／地點 metadata 或使用者提供的背景；缺少依據就省略或標記待確認。
+- 不從 GPS 座標推測景點，不把 OCR 當作已核實的事實，不推斷人物身分。精確 GPS 不顯示在成片文字中；OCR、ASR、旁白與編輯註解是不同類型的文字。
 
 字幕語意審閱不得改寫說話者原意。衛教影片字幕中的醫療主張必須回指使用者提供的內容或 references；找不到來源時標記待確認。
 

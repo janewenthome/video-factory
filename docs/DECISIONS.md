@@ -10,6 +10,7 @@ This file records reusable project decisions and production pitfalls. Per-projec
 - A new job uses `LOCAL_ONLY`, no narration, and automatic open-licensed background music. The opening Codex conversation guides the user to select `memory` or `public-health`, duration, aspect ratio, topic, and project path. It does not ask about narration or cloud processing.
 - Preserve every original asset. Put source copies in the project; keep generated media and HEIC-to-JPEG conversions under `work/` or `outputs/`.
 - Transcribe only retained clips that contain speech. Review candidate meaning in context; omit meaningless or uncertain captions rather than guessing. A model transcript is evidence, not approved copy.
+- Read photo EXIF/IPTC metadata and local OCR as evidence. Use embedded capture time for chronology; timezone-free timestamps remain approximate. GPS stays in private local metadata and is never reverse-geocoded or printed in the video. Text annotations are optional editorial candidates with traceable evidence, not generated facts.
 
 ## Automatic music and natural sound
 
@@ -28,6 +29,8 @@ This file records reusable project decisions and production pitfalls. Per-projec
 | Remotion/Chromium may reject certain MOV decoders or fail under a restricted process sandbox. | Use the existing `<OffthreadVideo>` fallback for unsupported MOV decoding, diagnose sandbox permission failures separately from media damage, then inspect the encoded output with ffprobe/FFmpeg. |
 | A render, schema check, or sampled contact sheet is not a full review of the finished video. | Report technical QA separately from full visual/audio QA. Only claim full review after actually watching and listening to the output. |
 | ASR can produce plausible but contradictory phrases on short noisy natural audio. | Use transcript candidates only after story selection; keep only semantically meaningful speech after review, and leave low-confidence wording out until a person confirms it. |
+| Photo EXIF often has a camera-local timestamp but no timezone; GPS can be absent or imprecise, and image OCR can misread signs. | Keep source, timezone, uncertainty, OCR box/confidence and source hash. Order timezone-free times as approximate, do not infer a venue from coordinates, and require review before turning OCR/metadata into an annotation. |
+| Static checks cannot establish that a system ImageIO/Vision stack decodes a specific photo correctly. | Do not claim photo EXIF/OCR live validation until a real local JPEG/HEIC result has been inspected; if the platform backend is unavailable, leave the field pending. |
 
 ## Reusable references
 
