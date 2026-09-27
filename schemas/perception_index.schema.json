@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-factory.local/schemas/perception-index.v1.json",
+  "title": "Video Factory Perception Index",
+  "type": "object",
+  "required": ["schema_version", "cache_key", "privacy", "compute", "models", "speech", "visual", "temporal", "editorial"],
+  "properties": {
+    "schema_version": {"const": "perception-index.v1"},
+    "cache_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "privacy": {
+      "type": "object",
+      "required": ["mode", "original_media_uploaded", "cloud_status", "eligible_uploads"],
+      "properties": {
+        "mode": {"enum": ["LOCAL_ONLY", "BALANCED", "MAX_QUALITY"]},
+        "original_media_uploaded": {"const": false},
+        "cloud_status": {"type": "string"},
+        "eligible_uploads": {"type": "object"}
+      }
+    },
+    "compute": {
+      "type": "object",
+      "required": ["gpu_policy", "premium_gpu_allowed"],
+      "properties": {"gpu_policy": {"enum": ["T4", "L4"]}, "premium_gpu_allowed": {"const": false}}
+    },
+    "models": {"type": "object"},
+    "speech": {"type": "object"},
+    "visual": {"type": "object"},
+    "temporal": {"type": "object"},
+    "editorial": {"type": "object"}
+  },
+  "additionalProperties": true
+}

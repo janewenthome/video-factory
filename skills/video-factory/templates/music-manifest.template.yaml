@@ -1,0 +1,17 @@
+# Copy tracks you are entitled to use into music-library/tracks and add one
+# entry per track. file is relative to the music-library directory.
+tracks:
+  - id: example-track
+    file: tracks/example-track.mp3
+    title: ""
+    mood: []
+    tempo: null # BPM, when known
+    energy: low # low | low_to_medium | medium | high
+    style: ""
+    duration: null # seconds
+    vocals: false
+    good_for: []
+    usage_rights:
+      status: unknown # user_owned | licensed | royalty_free | explicit_permission | unknown
+      attribution_required: false
+      attribution: ""

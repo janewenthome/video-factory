@@ -1,0 +1,23 @@
+{
+  "version": "gui-contract.v1",
+  "source_picker": "folder",
+  "profiles": ["family", "health_education"],
+  "duration_presets": ["short", "standard", "full", "custom"],
+  "music_modes": ["auto_open_licensed", "project_music", "local_licensed", "none"],
+  "review_modes": ["REVIEW", "AUTO", "MANUAL"],
+  "quality_modes": ["standard", "deep"],
+  "advanced": ["privacy_mode", "cloud_perception", "gpu_policy", "temporal_backend", "music_license_policy"],
+  "progress_messages": [
+    "正在理解影片內容",
+    "正在分析語音",
+    "正在整理相似畫面",
+    "正在尋找精彩片段",
+    "正在分析配樂需求",
+    "正在尋找適合的公開授權配樂",
+    "正在確認配樂授權",
+    "正在準備配樂",
+    "請先檢查剪輯摘要"
+  ],
+  "application_service": "video_editor.application.VideoFactoryApplication",
+  "source_summary_method": "inspect_source"
+}

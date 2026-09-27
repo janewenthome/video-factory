@@ -1,0 +1,54 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Temporary and cache directories
+.cache/
+.pnpm-store/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.DS_Store
+*.tmp
+*.log
+*.sqlite
+*.sqlite3
+
+# Project specific caches and ephemeral assets
+materials/raw/
+cache/
+/assets/
+/Input/
+/music-library/tracks/
+/projects/*/assets/
+/projects/*/work/
+/projects/*/outputs/
+/projects/first-edit/
+/outputs/
+.agents/skills/
+skills-lock.json
+AGENTS.md
+TODO.md
+PROGRESS.md
+
+# Private project handoff notes
+HANDOFF.md
+
+# Secrets and OAuth tokens
+*.token
+*.key
+credentials*
+secrets*
+.env
+.env.*
+!.env.example
+
+# Node modules
+node_modules/

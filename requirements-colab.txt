@@ -1,0 +1,17 @@
+# Pinned runtime shared by Colab speech, visual, and temporal perception stages.
+# GPU allocation remains T4 by default; these pins avoid cache drift.
+faster-whisper==1.2.1
+ctranslate2==4.6.0
+torch==2.8.0
+torchaudio==2.8.0
+transformers==4.57.6
+speechbrain==1.0.3
+numpy==1.26.4
+Pillow==11.3.0
+soundfile==0.13.1
+scipy==1.15.3
+huggingface-hub==0.36.0
+decord==0.6.0
+num2words==0.5.14
+nvidia-cublas-cu12==12.8.4.1
+nvidia-cudnn-cu12==9.10.2.21

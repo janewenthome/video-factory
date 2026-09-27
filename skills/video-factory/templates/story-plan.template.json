@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "profile": "memory",
+  "goal": "",
+  "opening": {"purpose": "", "estimated_seconds": 0},
+  "setup": {"purpose": "", "estimated_seconds": 0},
+  "progression": [],
+  "key_moments": [],
+  "peak": {"purpose": "", "estimated_seconds": 0},
+  "ending": {"purpose": "", "estimated_seconds": 0},
+  "music_arc": [],
+  "asset_hashes_used": [],
+  "uncertainties": []
+}

@@ -1,0 +1,52 @@
+id: public-health
+version: 1
+goal: "讓一般觀眾在短時間內理解並記住有來源支持的健康資訊。"
+
+story_priority:
+  informational: high
+  clarity: high
+  emotional: medium
+
+scoring:
+  scale:
+    min: 1
+    max: 5
+  weights:
+    technical_score: 0.08
+    visual_interest_score: 0.08
+    information_score: 0.22
+    clarity_score: 0.20
+    story_score: 0.10
+    teaching_value_score: 0.22
+    uniqueness_score: 0.10
+
+editing:
+  pace: medium
+  factual_accuracy_over_visual_style: true
+  allow_highlights_and_annotations: true
+
+captions:
+  enabled: true
+  burn_in: true
+
+text:
+  enabled: true
+  density: medium
+  allow_text_cards: true
+
+narration:
+  default: auto_if_useful
+
+references:
+  required_for_medical_claims: true
+  allowed_source_types:
+    - user_provided_material
+    - project_reference_file
+  require_claim_level_reference_ids: true
+  disallow_model_memory_as_source: true
+  reference_paths_are_project_relative: true
+
+privacy_review:
+  enabled: true
+  check_identifiable_people: true
+  review_before_publication: true

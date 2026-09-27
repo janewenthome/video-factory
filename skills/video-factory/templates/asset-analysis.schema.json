@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/video-factory/asset-analysis.schema.json",
+  "title": "Video Factory Asset Analysis",
+  "type": "object",
+  "required": ["version", "profile", "assets"],
+  "properties": {
+    "version": {"type": "integer", "minimum": 1},
+    "profile": {"type": "string", "minLength": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "sha256", "summary", "recommended_use", "reason"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "scene_id": {"type": "string"},
+          "technical_score": {"$ref": "#/$defs/score"},
+          "visual_interest_score": {"$ref": "#/$defs/score"},
+          "emotional_score": {"$ref": "#/$defs/score"},
+          "story_score": {"$ref": "#/$defs/score"},
+          "uniqueness_score": {"$ref": "#/$defs/score"},
+          "people_interaction_score": {"$ref": "#/$defs/score"},
+          "audio_value_score": {"$ref": "#/$defs/score"},
+          "information_score": {"$ref": "#/$defs/score"},
+          "clarity_score": {"$ref": "#/$defs/score"},
+          "teaching_value_score": {"$ref": "#/$defs/score"},
+          "captured_at": {"type": ["string", "null"]},
+          "orientation": {"type": ["string", "null"]},
+          "duplicate_cluster": {"type": ["string", "null"]},
+          "summary": {"type": "string"},
+          "recommended_use": {"type": "string"},
+          "reason": {"type": "string"},
+          "uncertainties": {"type": "array", "items": {"type": "string"}},
+          "medical_claims": {"type": "array", "items": {"$ref": "edit-plan.schema.json#/$defs/medicalClaim"}}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "score": {"type": ["integer", "null"], "minimum": 1, "maximum": 5}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,88 @@
+id: family
+version: 1
+alias_of: memory
+goal: "多年後仍值得家人重新看的家庭旅遊、親子與生活回憶影片。"
+duration_presets:
+  short: 90
+  standard: 180
+  full: 300
+duration_ranges:
+  short: [75, 105]
+  standard: [150, 210]
+  full: [250, 330]
+default_duration_preset: standard
+privacy_mode: BALANCED
+gpu_policy: T4
+temporal_backend: none
+
+story_priority:
+  emotional: high
+  chronological: medium
+  informational: low
+
+scoring:
+  scale:
+    min: 1
+    max: 5
+  weights:
+    technical_score: 0.08
+    visual_interest_score: 0.08
+    emotional_score: 0.23
+    story_score: 0.20
+    uniqueness_score: 0.12
+    people_interaction_score: 0.17
+    audio_value_score: 0.12
+
+editing:
+  pace: gentle
+  transition_style: subtle
+  transition_density: low
+  preserve_natural_audio: true
+  allow_imperfect_but_meaningful_clips: true
+  avoid:
+    - flashy_effects
+    - excessive_zoom
+    - identical_ken_burns_on_every_photo
+    - slideshow_feel
+  structure:
+    - hook
+    - establishing
+    - activity
+    - interaction
+    - highlight
+    - ending
+
+selection:
+  prioritize:
+    - emotional_value
+    - story_value
+    - people_and_interaction
+    - unique_moments
+    - natural_audio
+    - chronology
+    - technical_quality
+  prefer_story_value_over_using_every_asset: true
+  near_duplicate_strategy: keep_the_most_story_or_visual_value
+
+captions:
+  enabled: true
+  burn_in: true
+  density: low
+
+text:
+  enabled: true
+  density: low
+
+narration:
+  default: none
+
+music:
+  mode: auto_open_licensed
+  license_policy: SAFE_AUTO
+  default_energy: low_to_medium
+  keep_below_people_speech: true
+  favor_natural_audio: true
+
+natural_audio:
+  preserve: true
+  priority: high

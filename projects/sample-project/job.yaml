@@ -1,0 +1,57 @@
+# Example project job. Put selected originals under this project's assets/
+# directories; source material is not changed by the job configuration.
+profile: memory
+
+title: "Video Factory 合成素材測試"
+goal: "以本機生成的測試素材驗證短片渲染、字幕與音訊混合。"
+audience: "維護本 Skill 的使用者"
+target_duration_seconds: 15
+duration_preset: custom
+aspect_ratios:
+  - "16:9"
+language: zh-TW
+
+story:
+  chronological: true
+
+captions:
+  enabled: true
+  burn_in: true
+
+text_annotations:
+  enabled: true
+  density: low
+
+narration:
+  mode: none
+
+music:
+  enabled: true
+  mode: none
+  mood:
+    - warm
+    - reflective
+  intensity: low_to_medium
+
+natural_audio:
+  preserve: true
+
+privacy_mode: LOCAL_ONLY
+cloud_perception: false
+gpu_policy: T4
+temporal_backend: none
+music_license_policy: SAFE_AUTO
+
+references: []
+
+privacy_review:
+  enabled: true
+  check_identifiable_people: true
+  review_before_publication: true
+
+output:
+  master: true
+  subtitles_srt: true
+  transcript: true
+  edit_plan: true
+  qa_report: true

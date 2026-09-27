@@ -1,0 +1,50 @@
+# Copy this file to a project's job.yaml and edit the values for that video.
+profile: memory
+
+title: ""
+goal: ""
+audience: ""
+target_duration_seconds: 180
+aspect_ratios:
+  - "16:9"
+language: zh-TW
+
+story:
+  chronological: true
+
+captions:
+  enabled: true
+  burn_in: true
+
+text_annotations:
+  enabled: true
+  density: low # low | medium | high
+
+narration:
+  mode: none # none | auto_if_useful | user_provided
+
+music:
+  enabled: true
+  mood: []
+  intensity: low_to_medium # low | low_to_medium | medium | high
+
+natural_audio:
+  preserve: true
+
+# Keep source documents in the project assets/references directory. For a
+# public-health job, every medical claim used in narration or on-screen text
+# must map to at least one listed source and a claim-level reference ID in the
+# edit plan. Replace any example placeholders before production.
+references: []
+
+privacy_review:
+  enabled: true
+  check_identifiable_people: true
+  review_before_publication: true
+
+output:
+  master: true
+  subtitles_srt: true
+  transcript: true
+  edit_plan: true
+  qa_report: true

@@ -1,0 +1,59 @@
+# Before production, replace the reference placeholder with a real,
+# project-local official or user-provided source document. Health claims in
+# narration and on-screen text must cite that source in the edit plan.
+profile: public-health
+
+title: "60 秒衛教短片：手部衛生"
+goal: "依據指定衛教資料，製作一支重點清楚、便於一般觀眾理解的短片。"
+audience: "一般民眾"
+target_duration_seconds: 60
+aspect_ratios:
+  - "9:16"
+language: zh-TW
+
+story:
+  chronological: false
+
+captions:
+  enabled: true
+  burn_in: true
+
+text_annotations:
+  enabled: true
+  density: medium
+
+narration:
+  mode: auto_if_useful
+
+music:
+  enabled: true
+  mood:
+    - clear
+    - reassuring
+  intensity: low
+
+natural_audio:
+  preserve: true
+
+references:
+  - id: official-guidance-01
+    path: assets/references/REPLACE_WITH_OFFICIAL_GUIDANCE.pdf
+    title: "待填：官方衛教資料標題"
+    publisher: "待填：發布機關"
+    source_type: project_reference_file
+
+privacy_review:
+  enabled: true
+  check_identifiable_people: true
+  review_before_publication: true
+
+cloud_processing:
+  colab: ask_each_run
+  openai: ask_each_run
+
+output:
+  master: true
+  subtitles_srt: true
+  transcript: true
+  edit_plan: true
+  qa_report: true

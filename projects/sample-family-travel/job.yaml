@@ -1,0 +1,61 @@
+# Example project job. Put selected originals under this project's assets/
+# directories; source material is not changed by the job configuration.
+profile: memory
+
+title: "家庭旅行回憶"
+goal: "留下家人多年後仍願意重看的旅行故事，保留有意義的互動與現場聲音。"
+audience: "家人與親友"
+target_duration_seconds: 180
+duration_preset: standard
+aspect_ratios:
+  - "16:9"
+language: zh-TW
+
+story:
+  chronological: true
+
+captions:
+  enabled: true
+  burn_in: true
+
+text_annotations:
+  enabled: true
+  density: low
+
+narration:
+  mode: none
+
+music:
+  enabled: true
+  mode: auto_open_licensed
+  mood:
+    - warm
+    - reflective
+  intensity: low_to_medium
+
+natural_audio:
+  preserve: true
+
+references: []
+
+privacy_review:
+  enabled: true
+  check_identifiable_people: true
+  review_before_publication: true
+
+cloud_processing:
+  colab: ask_each_run
+  openai: ask_each_run
+
+privacy_mode: BALANCED
+cloud_perception: false
+gpu_policy: T4
+temporal_backend: none
+music_license_policy: SAFE_AUTO
+
+output:
+  master: true
+  subtitles_srt: true
+  transcript: true
+  edit_plan: true
+  qa_report: true

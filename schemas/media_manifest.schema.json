@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-factory.local/schemas/media_manifest.schema.json",
+  "title": "Video Factory Media Manifest",
+  "description": "Schema for inspected media assets and hash-based metadata cache.",
+  "type": "object",
+  "required": ["manifest_version", "generated_at", "assets", "errors"],
+  "properties": {
+    "manifest_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "sha256", "source", "kind", "metadata_status"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["photo", "video", "audio", "other"]
+          },
+          "mime_type": {
+            "type": ["string", "null"]
+          },
+          "size_bytes": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "modified_at": {
+            "type": ["string", "null"]
+          },
+          "duration_seconds": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "width": {
+            "type": ["integer", "null"]
+          },
+          "height": {
+            "type": ["integer", "null"]
+          },
+          "frame_rate": {
+            "type": ["number", "null"]
+          },
+          "orientation": {
+            "type": ["string", "null"]
+          },
+          "has_audio": {
+            "type": ["boolean", "null"]
+          },
+          "captured_at": {
+            "type": ["string", "null"]
+          },
+          "cache_reused": {
+            "type": "boolean"
+          },
+          "metadata_status": {
+            "type": "string",
+            "enum": ["ok", "partial", "error"]
+          }
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

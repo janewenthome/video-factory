@@ -1,0 +1,23 @@
+{
+  "name": "video-factory-remotion",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "render": "remotion render src/index.ts VideoFactory"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.529",
+    "@remotion/captions": "^4.0.529",
+    "@remotion/media": "^4.0.529",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "remotion": "^4.0.529"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "typescript": "^5.8.0"
+  }
+}

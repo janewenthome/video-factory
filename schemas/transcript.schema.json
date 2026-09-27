@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-factory.local/schemas/transcript.schema.json",
+  "title": "Video Factory Transcript Schema",
+  "description": "Schema for timestamped Whisper transcript cache and artifacts.",
+  "type": "object",
+  "required": ["schema_version", "cache_key", "request", "response"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cache_key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "request": {
+      "type": "object",
+      "required": ["source", "source_sha256", "model"],
+      "properties": {
+        "source": { "type": "string" },
+        "source_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "engine": { "type": "string" },
+        "model": { "type": "string" },
+        "gpu": { "type": "string" },
+        "language": { "type": ["string", "null"] }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["text", "segments"],
+      "properties": {
+        "text": { "type": "string" },
+        "segments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["start", "end", "text"],
+            "properties": {
+              "start": { "type": "number", "minimum": 0 },
+              "end": { "type": "number", "minimum": 0 },
+              "text": { "type": "string" },
+              "words": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["word", "start", "end"],
+                  "properties": {
+                    "word": { "type": "string" },
+                    "start": { "type": "number" },
+                    "end": { "type": "number" },
+                    "probability": { "type": "number" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

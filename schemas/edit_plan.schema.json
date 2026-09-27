@@ -1,0 +1,371 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/video-factory/edit-plan.schema.json",
+  "title": "Video Factory Edit Plan",
+  "description": "Time-based edit decisions. All source paths are POSIX-style paths relative to the project root; timeline and source times are seconds.",
+  "type": "object",
+  "required": [
+    "timeline"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "title": {
+      "type": "string"
+    },
+    "references": {
+      "type": "array",
+      "description": "Project-local source register for claims used in this edit plan.",
+      "items": {
+        "$ref": "#/$defs/reference"
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/timelineSegment"
+      },
+      "minItems": 1
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fps": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "duration_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 2,
+      "multipleOf": 2
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 2,
+      "multipleOf": 2
+    }
+  },
+  "$defs": {
+    "projectRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path relative to the project root, using forward slashes. Absolute paths, backslashes, and . or .. path components are not allowed.",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$)).+$"
+    },
+    "reference": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "path",
+        "source_type"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "$ref": "#/$defs/projectRelativePath"
+        },
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "user_provided_material",
+            "project_reference_file"
+          ]
+        },
+        "publisher": {
+          "type": "string"
+        },
+        "published_at": {
+          "type": "string",
+          "format": "date"
+        },
+        "source_url": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "additionalProperties": true
+    },
+    "medicalClaim": {
+      "type": "object",
+      "required": [
+        "statement",
+        "reference_ids"
+      ],
+      "properties": {
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The supported medical or health claim used by this timeline segment."
+        },
+        "reference_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "timelineSegment": {
+      "type": "object",
+      "required": [
+        "type",
+        "timeline_start",
+        "timeline_end"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "photo",
+            "video",
+            "title",
+            "text_card",
+            "subtitle",
+            "narration",
+            "music",
+            "natural_audio",
+            "overlay",
+            "annotation"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/projectRelativePath",
+          "description": "Project-relative media path, for example assets/videos/clip-01.mp4."
+        },
+        "source_in": {
+          "type": "number",
+          "minimum": 0,
+          "description": "In-point in the source media, in seconds."
+        },
+        "source_out": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Out-point in the source media, in seconds; must be greater than source_in."
+        },
+        "timeline_start": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Start time on the finished-video timeline, in seconds."
+        },
+        "timeline_end": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "End time on the finished-video timeline; must be greater than timeline_start."
+        },
+        "text": {
+          "type": "string"
+        },
+        "crop": {
+          "type": "object",
+          "properties": {
+            "object_position": {
+              "type": "string",
+              "minLength": 1
+            },
+            "fit": {
+              "enum": [
+                "cover",
+                "contain"
+              ]
+            },
+            "zoom_start": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "zoom_end": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "16:9": {
+              "$ref": "#/$defs/cropSettings"
+            },
+            "9:16": {
+              "$ref": "#/$defs/cropSettings"
+            }
+          },
+          "additionalProperties": false
+        },
+        "audio": {
+          "type": "object",
+          "properties": {
+            "volume": {
+              "type": "number",
+              "minimum": 0
+            },
+            "preserve_natural": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "transition": false,
+        "caption": false,
+        "annotations": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "text"
+            ],
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1
+              },
+              "position": {
+                "enum": [
+                  "center",
+                  "bottom"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "medical_claims": {
+          "type": "array",
+          "description": "For public-health plans, include every medical claim used by this segment and map it to reference IDs in the top-level references list.",
+          "items": {
+            "$ref": "#/$defs/medicalClaim"
+          }
+        },
+        "notes": {
+          "type": "string"
+        },
+        "volume": {
+          "type": "number",
+          "minimum": 0
+        },
+        "fade_in_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "fade_out_seconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "photo",
+                  "video",
+                  "narration",
+                  "music",
+                  "natural_audio"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "source"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "video",
+                  "narration",
+                  "music",
+                  "natural_audio"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "source_in",
+              "source_out"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "title",
+                  "text_card",
+                  "subtitle"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "text"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "cropSettings": {
+      "type": "object",
+      "properties": {
+        "object_position": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fit": {
+          "enum": [
+            "cover",
+            "contain"
+          ]
+        },
+        "zoom_start": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "zoom_end": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}
