@@ -50,3 +50,7 @@ must exist first. The runner stays local-only. It samples macOS `memory_pressure
 and Swapouts, cools down between projects, and pauses if readings remain unsafe
 or unavailable. Queue UI controls are specified here but the Tauri GUI itself
 has not been implemented.
+
+For batches, submit the project paths in one Codex task and prepare/enqueue them
+sequentially. Do not run a separate heavy Codex task for every project: the
+queue lock cannot limit memory used by other Codex/ChatGPT tasks or Ollama.

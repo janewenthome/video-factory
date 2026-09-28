@@ -50,7 +50,7 @@ python3 -m video_editor queue run
 
 支援 `queue pause`、`queue resume`、`queue cancel JOB_ID` 與 `queue reorder JOB_ID...`。取消執行中的工作會停止其 process group 並確認退出，再開始下一支。失敗工作預設最多執行兩次，之後標記 failed 並繼續其餘項目。狀態、lock 和完整 log 保存在 `.video-factory/`；該目錄已排除於 Git。
 
-Runner 在開始前取兩次唯讀 `memory_pressure` 樣本；之後每支影片間冷卻 45 秒並比較前後 free-memory 與 Swapouts。資源不穩時每 30 秒重查，最多三次，仍無法確認安全便持久暫停。低於 10% free-memory、Swapouts 持續增加或讀值不可用都會阻止下一支。此 10% 是保守 heuristic，不是 macOS 正式 pressure level；它只限制 Video Factory 工作，不會限制多個 Codex/ChatGPT 工作階段或 Ollama 本身的記憶體使用。若在不同 clone/worktree 共用佇列，為它們設定相同的 `VIDEO_FACTORY_QUEUE_FILE`。
+Runner 在開始前取兩次唯讀 `memory_pressure` 樣本；之後每支影片間冷卻 45 秒並比較前後 free-memory 與 Swapouts。資源不穩時每 30 秒重查，最多三次，仍無法確認安全便持久暫停。低於 10% free-memory、Swapouts 持續增加或讀值不可用都會阻止下一支。此 10% 是保守 heuristic，不是 macOS 正式 pressure level。需要批次剪輯時，請在一個 Codex 工作中提供多個專案路徑，逐案準備計畫後加入 queue；不要同時啟動多個重型 Codex 工作。queue 只限制 Video Factory 媒體程序，不能限制其他 Codex/ChatGPT 工作階段或 Ollama 的記憶體使用。若在不同 clone/worktree 共用佇列，為它們設定相同的 `VIDEO_FACTORY_QUEUE_FILE`。
 
 桌面 GUI 尚未實作；`apps/ai-video-studio/gui_contract.json` 已列出未來 GUI 的 queue 狀態、控制項與結構化事件。
 

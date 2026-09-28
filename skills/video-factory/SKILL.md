@@ -56,6 +56,8 @@ For a project already in progress, identify it from the user's path/current work
 
 Several projects may be prepared and queued together, but local media work must run one project at a time. The persistent queue and the shared heavy-job lock enforce `max_parallel_jobs = 1` for Video Factory CLI and application-service operations in this checkout. Do not start a second proxy, Whisper, perception or render process when the lock is busy; add its project to the queue instead.
 
+For a memory-safe batch, have the user provide all project paths in one Codex task, prepare them sequentially, then run one queue. Do not launch one heavy Codex task per project. The queue controls Video Factory media processes; it does not serialize memory used by separate Codex/ChatGPT tasks or Ollama.
+
 Before adding a project, Codex must finish its `job.yaml`, evidence-based `work/analysis/story_plan.json`, validated `work/edit-plan/edit_plan.json`, subtitle decisions and music/license decision. The queue runner executes that prepared project through the local pipeline; it does not invent the editorial plan or pick music without Codex. `--force` is for an intentional full re-run after revising a completed project.
 
 From the repository root, the CLI workflow is:
