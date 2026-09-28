@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from video_factory import (
+    IMAGE_SUFFIXES,
     MANIFEST_RELATIVE_PATH,
     UserFacingError,
+    VIDEO_SUFFIXES,
     ffprobe_metadata,
     is_within,
     load_json,
@@ -58,9 +60,16 @@ def get_manifest_assets(project: Path, kinds: set[str] | None = None) -> list[di
         source = asset["source"]
         if source.startswith("/") or re.match(r"^[A-Za-z]:", source) or "\\" in source or any(part in {"", ".", ".."} for part in source.split("/")):
             raise UserFacingError(f"Media manifest contains an invalid relative source path: {source!r}")
-        path = project_path(project, Path(*source.split("/")))
-        if not path.is_file() or not is_within(path, project_path(project, "assets")):
-            raise UserFacingError(f"Manifest source is missing or escapes assets/: {source}. Re-run `inspect PROJECT`.")
+        relative_source = Path(*source.split("/"))
+        path = project_path(project, relative_source)
+        in_assets = is_within(path, project_path(project, "assets"))
+        in_project_root = (
+            len(relative_source.parts) == 1
+            and path.suffix.lower() in IMAGE_SUFFIXES | VIDEO_SUFFIXES
+            and is_within(path, project)
+        )
+        if not path.is_file() or not (in_assets or in_project_root):
+            raise UserFacingError(f"Manifest source is missing or outside supported project media locations: {source}. Re-run `inspect PROJECT`.")
         current_hash = sha256_file(path)
         if asset.get("sha256") != current_hash:
             raise UserFacingError(f"Asset changed since inspection: {source}. Run `inspect PROJECT` again first.")
@@ -116,8 +125,15 @@ def decode_heic_output(source: Path, output: Path, *, max_dimension: int = 960) 
     Prefer libheif's converter when available. Otherwise decode the HEIC
     directly with FFmpeg; macOS ``sips`` is intentionally not used because it
     can report success while writing an incomplete or black JPEG for some files.
+    Some phone exports retain a ``.HEIC`` filename after converting the
+    payload to JPEG, so detect that signature and bypass libheif for those files.
     """
-    heif_convert = shutil.which("heif-convert")
+    try:
+        with source.open("rb") as handle:
+            is_jpeg_payload = handle.read(3) == b"\xff\xd8\xff"
+    except OSError as exc:
+        return False, f"could not read image source: {exc}"
+    heif_convert = None if is_jpeg_payload else shutil.which("heif-convert")
     ffmpeg = require_ffmpeg()
     temporary: str | None = None
     try:
@@ -138,8 +154,11 @@ def decode_heic_output(source: Path, output: Path, *, max_dimension: int = 960) 
             decode_source = temporary
         else:
             decode_source = str(source)
-        scaled = [
-            ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", decode_source,
+        scaled = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        if is_jpeg_payload and not heif_convert:
+            scaled += ["-f", "mjpeg"]
+        scaled += [
+            "-i", decode_source,
             "-frames:v", "1", "-vf",
             f"scale={max_dimension}:-2:force_original_aspect_ratio=decrease",
             "-q:v", "2", str(output),
@@ -349,10 +368,10 @@ def command_extract_frames(args: Any) -> int:
             "analysis_source": proxy_relative or source,
             "samples": [{"time": round(timestamp, 3) if timestamp is not None else None, "scene_id": scene_id} for timestamp, scene_id in sample_times],
         }
-        if asset.get("kind") == "photo" and Path(source).suffix.lower() == ".heic":
-            # Invalidate older HEIC frames that may have been emitted by sips
-            # without successfully decoding tiled iPhone images.
-            asset_settings["still_decoder"] = "libheif-verified-v2"
+        if asset.get("kind") == "photo" and Path(source).suffix.lower() in {".heic", ".heif"}:
+            # Include the signature-aware decoder in cache identity so mislabeled
+            # JPEG payloads are retried instead of reusing earlier failures.
+            asset_settings["still_decoder"] = "signature-aware-heif-v3"
         if not sample_times:
             failures.append(f"{source}: no valid frame sample times; inspect the source duration")
         cached_frames = prior.get("frames") if isinstance(prior, dict) else None

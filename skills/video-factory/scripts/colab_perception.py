@@ -76,6 +76,11 @@ TEMPORAL_RUNTIME_PACKAGE_NAMES = {
 }
 
 
+def _find_colab_cli() -> str | None:
+    """Resolve the Colab executable through a testable, provider-specific seam."""
+    return shutil.which("colab")
+
+
 def _runtime_packages(stage: str) -> dict[str, str]:
     names = PERCEPTION_RUNTIME_PACKAGE_NAMES if stage == "perception" else TEMPORAL_RUNTIME_PACKAGE_NAMES
     return {name: version for name, version in COLAB_PACKAGE_VERSIONS.items() if name in names}
@@ -1621,7 +1626,7 @@ def command_colab_perception(args: Any) -> int:
                 raise UserFacingError("Set job.yaml cloud_processing.colab: ask_each_run before a Colab perception upload.")
             if not getattr(args, "allow_upload", False):
                 raise UserFacingError("Add --allow-upload after reviewing the derived-audio and representative-frame transfer plan.")
-            cli_path = shutil.which("colab")
+            cli_path = _find_colab_cli()
             if cli_path is None:
                 raise UserFacingError("The Colab CLI is not installed.")
             index, remote, _ = _run_remote_stage(
@@ -1660,7 +1665,7 @@ def command_colab_perception(args: Any) -> int:
                 raise UserFacingError("Set job.yaml cloud_processing.colab: ask_each_run before temporal proxy upload.")
             if not getattr(args, "allow_upload", False):
                 raise UserFacingError("Add --allow-upload after reviewing the exact shortlisted 720p proxies.")
-            cli_path = shutil.which("colab")
+            cli_path = _find_colab_cli()
             if cli_path is None:
                 raise UserFacingError("The Colab CLI is not installed.")
             temporal_gpu = requested_gpu

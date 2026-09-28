@@ -126,7 +126,7 @@ class PipelineOrchestrator:
         no_gpu: bool = False,
         gpu: str = "T4",
         allow_upload: bool = False,
-        gate: str = "REVIEW",
+        gate: str = "AUTO",
         dry_run: bool = False,
         approve_review: bool = False,
         duration_preset: str | None = None,

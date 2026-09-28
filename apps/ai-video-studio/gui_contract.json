@@ -1,10 +1,11 @@
 {
-  "version": "gui-contract.v1",
+  "version": "gui-contract.v2",
   "source_picker": "folder",
   "profiles": ["family", "health_education"],
   "duration_presets": ["short", "standard", "full", "custom"],
   "music_modes": ["auto_open_licensed", "project_music", "local_licensed", "none"],
-  "review_modes": ["REVIEW", "AUTO", "MANUAL"],
+  "review_modes": ["AUTO", "REVIEW", "MANUAL"],
+  "default_review_mode": "AUTO",
   "quality_modes": ["standard", "deep"],
   "advanced": ["privacy_mode", "cloud_perception", "gpu_policy", "temporal_backend", "music_license_policy"],
   "progress_messages": [
@@ -19,5 +20,30 @@
     "請先檢查剪輯摘要"
   ],
   "application_service": "video_editor.application.VideoFactoryApplication",
-  "source_summary_method": "inspect_source"
+  "source_summary_method": "inspect_source",
+  "queue": {
+    "service": "video_editor.application.VideoFactoryQueue",
+    "max_parallel_jobs": 1,
+    "statuses": ["pending", "running", "completed", "failed", "cancelled"],
+    "controls": ["add", "start_all", "pause", "resume", "cancel_one", "reorder"],
+    "progress_events": [
+      "queue_job_added",
+      "queue_progress",
+      "queue_job_started",
+      "queue_job_process_started",
+      "queue_job_process_completed",
+      "queue_job_process_cancelled",
+      "queue_job_cancel_requested",
+      "queue_reordered",
+      "queue_paused",
+      "queue_resumed",
+      "queue_finished"
+    ],
+    "resource_gate": {
+      "provider": "macOS memory_pressure",
+      "default_cooldown_seconds": 45,
+      "default_recheck_seconds": 30,
+      "pause_when_unavailable": true
+    }
+  }
 }

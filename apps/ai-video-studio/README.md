@@ -13,7 +13,7 @@ parses CLI stdout.
 - Family or Health Education
 - Short / Standard / Full / custom duration
 - music: auto openly licensed, project music, local licensed music, or none
-- review mode: REVIEW (default), AUTO, or MANUAL
+- review mode: AUTO (default creates the first cut), REVIEW, or MANUAL
 - AI quality: standard or deep
 - each render keeps a version under `outputs/versions/`
 - advanced: privacy mode, cloud perception, GPU policy
@@ -34,3 +34,19 @@ status = app.run()
 
 The current GUI contract is complete enough for a desktop shell to be added
 without moving deterministic media work or changing the edit-plan contract.
+
+## Multi-project queue
+
+`video_editor.application.VideoFactoryQueue` exposes the same persistent queue
+used by the CLI. A future GUI should show pending/running/completed/failed jobs,
+the current project and log location, and support add/start-all/pause/resume/
+cancel/reorder. The queue runner and shared heavy-job lock enforce one local
+pipeline at a time. Pausing waits for the current project to exit; cancelling a
+running project stops and reaps its process group before another job starts.
+
+Only a prepared project can be queued: `job.yaml`, a Codex-authored
+`work/analysis/story_plan.json`, and a validated `work/edit-plan/edit_plan.json`
+must exist first. The runner stays local-only. It samples macOS `memory_pressure`
+and Swapouts, cools down between projects, and pauses if readings remain unsafe
+or unavailable. Queue UI controls are specified here but the Tauri GUI itself
+has not been implemented.

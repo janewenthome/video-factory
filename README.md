@@ -1,12 +1,12 @@
 # Video Factory (Codex + Mac mini M4 local-first; optional Colab perception)
 
-這是一套可重複使用的 AI 影片剪輯系統：**Antigravity/Gemini** 負責最終故事與剪輯決策，**Codex** 協調工具、計畫驗證與本機執行，**Mac mini M4** 負責素材處理、本機語音推論、proxy、FFmpeg 與最終渲染；**Claude Opus** 可作選擇性深度複核。Colab perception adapter 保留為未來擴充，目前不在執行路徑。
+這是一套可重複使用的 AI 影片剪輯系統：**Codex** 依需求自動建立第一版故事與剪輯計畫、協調工具並驗證輸出；**Mac mini M4** 負責素材處理、本機語音推論、proxy、FFmpeg 與最終渲染；**Antigravity/Gemini** 和 **Claude Opus** 可作選擇性複核。使用者看完初版後再提出修改。Colab perception adapter 保留為未來擴充，目前不在執行路徑。
 
 ---
 
 ## 目前可用範圍
 
-目前提供 Python CLI、本機確定性媒體處理工具、可選雲端 adapter、音樂搜尋命令，以及供桌面程式呼叫的 application service。`apps/ai-video-studio/` 是未來 Tauri GUI 的介面規格；完整桌面 GUI 尚未實作。故事與字幕判斷由導演模型或使用者確認；renderer 不自行推斷故事或改寫語音。
+目前提供 Python CLI、本機確定性媒體處理工具、可選雲端 adapter、音樂搜尋命令，以及供桌面程式呼叫的 application service。`apps/ai-video-studio/` 是未來 Tauri GUI 的介面規格；完整桌面 GUI 尚未實作。Codex 會自動建立首版故事／剪輯計畫並判斷字幕候選；renderer 不自行推斷故事或改寫語音。
 
 ## 開始使用
 
@@ -19,27 +19,44 @@ cd /Volumes/2TB/program/video_factory
 python3 skills/video-factory/scripts/video_factory.py init projects/first-edit --profile memory
 ```
 
-衛教影片把 `memory` 改成 `public-health`，並備妥可引用的來源。把一小批素材的複本放入新專案的 `assets/videos/`、`assets/photos/`，原始檔留在原位置。接著提供影片類型、片長、比例、主題／要留下的時刻，以及複本所在的專案路徑；不必先整理或複製整個素材庫。
+衛教影片把 `memory` 改成 `public-health`，並備妥可引用的來源。素材可放在 `assets/videos/`、`assets/photos/`，也可直接放在專案根目錄；Codex 會盤點專案內全部支援的照片與影片，原始檔保持不變。接著提供影片類型、片長、比例、主題／要留下的時刻與專案路徑。需求足夠時，Codex 會直接建立故事計畫、剪輯計畫、選擇可核實授權的配樂並輸出本機初版；看完後再告訴 Codex 要怎麼修改。
 
 ```bash
-# 建立新專案，先檢查 job.draft.yaml，再核准為 job.yaml
+# 建立新專案；Codex 會依完整需求建立 job 並產生第一版
 python3 skills/video-factory/scripts/video_factory.py init projects/my-family-edit --profile memory
 
-# 加入自己的素材後，盤點 metadata、建立 proxies / scenes / 音訊 / 接觸表
+# 加入素材後，盤點 metadata、建立 proxies / scenes / 音訊 / 接觸表
 python3 -m video_editor prepare projects/my-family-edit --mode family
 
 # 建立本機 perception index；此步驟不會上傳檔案
 python3 -m video_editor perception projects/my-family-edit --privacy-mode LOCAL_ONLY
 
-# 驗證 edit plan；依 skill 建立並審閱 edit_plan.json 後才能 render
+# 驗證 edit plan
 python3 skills/video-factory/scripts/video_factory.py validate-plan projects/my-family-edit
 ```
 
 每個 project 的來源素材放在 `assets/`，本機 cache 和衍生物放在 `work/`，交付物放在 `outputs/`。私人 project 資料不得提交到公開 repository。
 
+### 多專案序列佇列
+
+可以先把多個已完成故事與剪輯計畫的 project 加入佇列，再啟動一次 runner。影片分析、Whisper、proxy、FFmpeg 和 render 共用一把重型工作鎖；同一時間只處理一個 project。`queue add` 需要 `job.yaml`、`work/analysis/story_plan.json` 和 `work/edit-plan/edit_plan.json`，並在加入前驗證 edit plan。Codex 仍負責建立故事、字幕與配樂決策；runner 按保存的計畫執行本機 pipeline。
+
+```bash
+python3 -m video_editor queue add projects/project-a
+python3 -m video_editor queue add projects/project-b
+python3 -m video_editor queue list
+python3 -m video_editor queue run
+```
+
+支援 `queue pause`、`queue resume`、`queue cancel JOB_ID` 與 `queue reorder JOB_ID...`。取消執行中的工作會停止其 process group 並確認退出，再開始下一支。失敗工作預設最多執行兩次，之後標記 failed 並繼續其餘項目。狀態、lock 和完整 log 保存在 `.video-factory/`；該目錄已排除於 Git。
+
+Runner 在開始前取兩次唯讀 `memory_pressure` 樣本；之後每支影片間冷卻 45 秒並比較前後 free-memory 與 Swapouts。資源不穩時每 30 秒重查，最多三次，仍無法確認安全便持久暫停。低於 10% free-memory、Swapouts 持續增加或讀值不可用都會阻止下一支。此 10% 是保守 heuristic，不是 macOS 正式 pressure level；它只限制 Video Factory 工作，不會限制多個 Codex/ChatGPT 工作階段或 Ollama 本身的記憶體使用。若在不同 clone/worktree 共用佇列，為它們設定相同的 `VIDEO_FACTORY_QUEUE_FILE`。
+
+桌面 GUI 尚未實作；`apps/ai-video-studio/gui_contract.json` 已列出未來 GUI 的 queue 狀態、控制項與結構化事件。
+
 ### 本機分析、字幕與隱私
 
-先完成剪輯計畫，再對保留片段中偵測到語音的音訊產生本機逐字稿候選與時間戳，讓字幕與最後時間軸對齊。指定導演模型或使用者檢查每句在上下文中的意義；Codex 將明確的 keep/drop 決定寫入審核記錄：有意義的語音保留字幕；無意義、噪音、幻覺或無法辨識的片段不燒字幕；不確定內容標記人工確認，不自行補寫。輸出前驗證 SRT 時間範圍與重疊。
+先完成剪輯計畫，再對保留片段中偵測到語音的音訊產生本機逐字稿候選與時間戳，讓字幕與最後時間軸對齊。Codex 自動判斷每句在上下文中的意義並記錄 keep/drop：有意義的語音保留字幕；無意義、噪音、幻覺或無法辨識的片段不燒字幕；不確定內容先省略並記錄，不自行補寫。輸出前驗證 SRT 時間範圍與重疊。這是自動首版流程，不等待逐句人工審核。
 
 安裝本機語音辨識 backend：
 
@@ -48,7 +65,7 @@ uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python -r requirements-local.txt
 ```
 
-先建立並確認 `edit_plan.json`，再只對保留現場聲的影片片段產生字幕候選：
+建立 `edit_plan.json` 後，只對保留現場聲的影片片段產生字幕候選：
 
 ```bash
 .venv/bin/python skills/video-factory/scripts/video_factory.py draft-captions projects/my-family-edit --language zh
@@ -56,7 +73,7 @@ uv pip install --python .venv/bin/python -r requirements-local.txt
 
 若你已有其他 MLX Whisper 模型快取，可用 `--model` 與 `--model-revision` 指定該快照；CLI 預設不下載模型，只有加 `--allow-model-download` 才允許取得缺少的權重。revision 可從 Hugging Face cache 的 snapshot 目錄取得。
 
-Codex 閱讀 `work/transcripts/caption_candidates.json`，對每個候選寫入 `work/transcripts/caption_review.json`。該檔必須保留候選中的 `edit_plan_sha256` 和 `candidate_set_sha256`，並為每個候選指定 `keep` 或 `drop` 及理由；未決定的候選不會套用。完成語意審閱後：
+自動首版流程中，Codex 依音訊和逐字稿候選直接寫入 `work/transcripts/caption_review.json`，記錄每句 `keep` 或 `drop` 及理由，不等待人工逐句核准。若使用者想自行覆核，也可手動執行以下命令：
 
 ```bash
 .venv/bin/python skills/video-factory/scripts/video_factory.py apply-caption-review projects/my-family-edit --review work/transcripts/caption_review.json
@@ -64,7 +81,7 @@ Codex 閱讀 `work/transcripts/caption_candidates.json`，對每個候選寫入 
 .venv/bin/python skills/video-factory/scripts/video_factory.py export-srt projects/my-family-edit
 ```
 
-若候選都是噪音、幻覺、純語助詞或無法辨識片段，標記 `drop`；有意義內容保留原意，不自行改寫。SRT 僅在通過時間、重疊和片長驗證後交給 renderer。
+若候選都是噪音、幻覺、純語助詞或無法辨識片段，標記 `drop`；有意義內容保留原意，不自行改寫。SRT 通過時間、重疊和片長驗證後交給 renderer。
 
 目前剪輯工作流程在 Mac 本機執行，不會把音訊、影格或影片交給 Colab。Colab worker code 保留為未來可選擴充；[Google Colab MCP](https://github.com/googlecolab/colab-mcp) 要求 client 支援動態 `notifications/tools/list_changed`，而 [Codex issue #43642](https://github.com/openai/codex/issues/43642) 記錄了非同步啟動時工具清單未刷新的情形，因此先暫緩使用。更多已確認的架構決定與踩坑記錄見 [docs/DECISIONS.md](docs/DECISIONS.md)。
 
@@ -89,15 +106,15 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 ## 系統如何製作影片
 
 
-1. 本機 Python 和 ffprobe 盤點每個檔案、計算 SHA-256，並快取 metadata。JPEG/HEIC/HEIF 另外由 Apple ImageIO 讀 EXIF 拍攝時間、時區、GPS 和 IPTC 內嵌地名；manifest 依可解析的拍攝時間排序，時區缺失會標成 approximate。
+1. 本機 Python 和 ffprobe 盤點 `assets/` 及專案根目錄中的來源照片／影片，計算 SHA-256 並快取 metadata；內容完全相同的檔案只保留一筆索引，其他路徑記錄為 duplicate sources。JPEG/HEIC/HEIF 另外由 Apple ImageIO 讀 EXIF 拍攝時間、時區、GPS 和 IPTC 內嵌地名；manifest 依可解析的拍攝時間排序，時區缺失會標成 approximate。
 2. FFmpeg/VideoToolbox 產生場景候選、proxy、代表影格、接觸表與抽取音訊；素材本身保持不變。
 3. 建立 `work/perception_index.json`，加入照片／代表影格的本機 Apple Vision OCR、拍攝時間與 GPS 證據、語音逐字稿及信心訊號；缺少的元件標記為 pending/not configured。OCR 文字不是字幕或核准文案，GPS 不做外部反查。
-4. Antigravity/Gemini 導演依 profile、transcript、perception evidence 與素材資料決定故事、片段、節奏和情緒走向；Codex 將核定方向寫成 `story_plan.json`、`edit_plan.json` 並驗證。
-5. 依已確認的 edit plan，對保留且含語音的片段執行本機轉錄，再將時間戳映射到輸出時間軸；指定導演模型或使用者判斷字幕是否有意義，Codex 記錄 keep/drop。只省略被判定無意義的字幕，不改寫或編造語音。
+4. Codex 依 profile、transcript、perception evidence 與素材資料建立 `story_plan.json` 和 `edit_plan.json`，自動完成第一版故事、片段、節奏和情緒走向，不等待計畫核准；使用者看過初版後再提出修改。Antigravity/Gemini 可作選擇性複核。
+5. 依 edit plan，對保留且含語音的片段執行本機轉錄，再將時間戳映射到輸出時間軸；Codex 判斷字幕是否有意義並記錄 keep/drop。只省略無意義或不確定的字幕，不改寫或編造語音。
 6. 驗證器檢查素材路徑、時間範圍、公衛 claim references 與字幕 cue；Codex 協調和審閱結果。
-7. 本機 Remotion 依 edit plan 合成畫面、燒錄經審閱字幕、調整配樂音量並輸出 MP4；FFmpeg/ffprobe 執行媒體檢查。
+7. 本機 Remotion 依 edit plan 合成畫面、燒錄語意判斷後保留的字幕、調整配樂音量並輸出 MP4；FFmpeg/ffprobe 執行媒體檢查。
 8. 音樂流程先寫 `work/music_requirements.json`（同步鏡像至 `outputs/work/`）；SAFE_AUTO 只接受 Public Domain、CC0、CC BY 且有上游證據的曲目。搜尋或授權失敗時無音樂完成，並產生 `work/music_attribution.json`、`outputs/work/music_attribution.json`、`outputs/final/music_attribution.json`、`outputs/MUSIC_CREDITS.txt`、`outputs/PUBLISHING_CREDITS.txt`。
-9. Skill 匯出 SRT、QA 報告與少量人工 review notes。修改時沿用 hash 未變的檢查、影格、perception 與分析結果，只重做受影響的步驟。
+9. Skill 匯出 SRT、QA 報告與 review notes，直接交付第一版。修改時沿用 hash 未變的檢查、影格、perception 與分析結果，只重做受影響的步驟。
 
 `edit_plan.json` 是 render 的剪輯決策來源。Renderer 不會自行挑素材、改故事或補寫醫療資訊。16:9 與 9:16 需分別做構圖決定，並各自 render。
 
@@ -118,7 +135,7 @@ python3 -m video_editor music add <TRACK_ID> --project projects/my-family-edit
 | 功能 | 執行位置 | 備註 |
 |---|---|---|
 | EXIF/GPS、metadata chronology、SHA-256 cache、proxy、scene detection、frames/contact sheets、Apple Vision OCR、speech transcription | Mac mini M4 | 照片時間／GPS與圖片文字留在本機；字幕候選保留 Whisper 信心訊號並須聽音審閱；不自動上傳 |
-| 故事／剪輯決策 | Antigravity/Gemini 導演 | Codex 將核定方向落成 edit plan；perception 分數只作線索 |
+| 故事／剪輯決策 | Codex 依使用者需求與素材證據建立首版 | 可由 Antigravity/Gemini 或 Claude Opus 選擇性複核；perception 分數只作線索 |
 | 字幕語意審閱 | 指定導演模型／使用者；Codex 記錄決定 | 有意義內容保留，無意義 cue 可省略，不改寫原話 |
 | Remotion render、FFmpeg、SRT 匯出與 QA | Mac M4 | 最終編碼不使用 Colab GPU |
 | Colab notebook / GPU perception | Optional, currently deferred | Codex dynamic MCP tool refresh support is not available reliably; no current inference/upload path |
@@ -138,7 +155,8 @@ The local EXIF/GPS and Apple Vision OCR path is now wired into inspection and pe
 - `skills/video-factory/profiles/`：`memory` 和 `public-health` 導演偏好。
 - `skills/video-factory/templates/`：job、edit plan、素材分析與 story plan 格式。
 - `skills/video-factory/scripts/`：本機確定性工具及保留的可選雲端 adapters。
-- `video_editor/application.py`：GUI／桌面應用呼叫的 application boundary 與結構化 progress events。
+- `video_editor/application.py`、`video_editor/queue_runner.py`：GUI／桌面應用呼叫的 application boundary、序列 queue service 與結構化 progress events。
+- `video_editor/job_queue.py`、`video_editor/system_resources.py`、`video_editor/process_lock.py`：persistent queue、Mac memory/swap 閘門及跨程序重型工作鎖。
 - `skills/video-factory/scripts/perception.py`、`colab_perception.py`：Perception Index 與 derived-data Colab worker。
 - `skills/video-factory/references/colab.md`：Colab CLI、MCP、Computer Use 的分工與授權流程。
 - `skills/video-factory/runtime/remotion/`：鎖定版本的 Remotion composition 與 dependencies。
@@ -172,7 +190,7 @@ python3 <SKILL_DIR>/scripts/video_factory.py qa <PROJECT> --video outputs/master
 
 若 runtime 尚無 `node_modules/`，先在該 runtime 執行 `pnpm install`；不需安裝全域 Remotion。
 
-字幕只分析 edit plan 已保留現場音的片段。用 `draft-captions` 產生候選、由指定導演模型或使用者逐句判斷、以 `apply-caption-review` 套用明確的 keep/drop，再匯出 SRT。預設沿用本機快取，找不到模型時不下載、不改送外部服務；不會把 API 或 Colab 當成 fallback。清楚有意義的原話按詞級時間戳映射到最終 timeline；意義或轉錄不確定時不猜詞，留在審閱記錄供人工核對。
+字幕只分析 edit plan 已保留現場音的片段。用 `draft-captions` 產生候選後，Codex 自動判斷有意義的語音並以 `apply-caption-review` 套用 keep/drop，再匯出 SRT。預設沿用本機快取，找不到模型時不下載、不改送外部服務；不會把 API 或 Colab 當成 fallback。清楚有意義的原話按詞級時間戳映射到最終 timeline；意義或轉錄不確定時先不放字幕，並在 review notes 說明。
 
 Remotion runtime 版本由 `skills/video-factory/runtime/remotion/package.json` 和 lockfile 固定。若 runtime 尚無 `node_modules/`，在該目錄執行 `pnpm install`。專案提供的 Remotion Agent Skills 可放在 `.agents/skills/`；此目錄是本機開發輔助檔，不是執行核心程式的必要依賴。
 

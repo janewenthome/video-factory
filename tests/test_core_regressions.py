@@ -177,7 +177,7 @@ class CoreRegressions(unittest.TestCase):
             first = json.loads((project / "work/render-input.json").read_text())
             photo = first["timeline"][0]
             self.assertEqual(photo["source_project_path"], "assets/photos/family.HEIC")
-            self.assertTrue(photo["source_url"].endswith("-heic-v2.jpg"))
+            self.assertTrue(photo["source_url"].endswith("-heif-v3.jpg"))
             render_jpeg = project / "work/render-public" / photo["source_url"]
             self.assertTrue(render_jpeg.is_file())
             self.assertEqual(render_jpeg.read_bytes(), b"verified full-resolution JPEG")

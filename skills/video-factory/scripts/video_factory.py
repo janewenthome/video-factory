@@ -26,6 +26,12 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
+REPOSITORY_ROOT = SCRIPT_DIR.parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from video_editor.process_lock import HeavyJobBusy, exclusive_heavy_job
+
 TEMPLATE_PATH = SKILL_DIR / "templates" / "job.template.yaml"
 PROFILES_DIR = SKILL_DIR / "profiles"
 PLAN_RELATIVE_PATH = Path("work/edit-plan/edit_plan.json")
@@ -574,6 +580,16 @@ def collect_media_files(project: Path) -> list[tuple[str, Path]]:
             raise UserFacingError(f"Asset path escapes assets/ through a symlink: {path.relative_to(project)}")
         source = path.relative_to(project).as_posix()
         files.append((source, path.resolve(strict=True)))
+
+    # Projects may already contain source photos and videos at their root.
+    # Include only direct child image/video files; work/, outputs/ and other
+    # nested directories remain governed by the assets/ scan above.
+    for path in sorted(project.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES | VIDEO_SUFFIXES:
+            continue
+        if not is_within(path, project):
+            raise UserFacingError(f"Project media path escapes the project through a symlink: {path.name}")
+        files.append((path.name, path.resolve(strict=True)))
     return files
 
 
@@ -594,11 +610,18 @@ def command_inspect(args: argparse.Namespace) -> int:
     assets: list[dict[str, Any]] = []
     new_cache: dict[str, Any] = {}
     errors: list[str] = []
+    seen_by_hash: dict[str, dict[str, Any]] = {}
+    scanned_count = 0
     for source, path in collect_media_files(project):
+        scanned_count += 1
         try:
             digest = sha256_file(path)
         except UserFacingError as exc:
             errors.append(f"{source}: {exc}")
+            continue
+        duplicate = seen_by_hash.get(digest)
+        if duplicate is not None:
+            duplicate.setdefault("duplicate_sources", []).append(source)
             continue
         cache_record = cache_entries.get(digest)
         suffix = path.suffix.lower()
@@ -700,6 +723,7 @@ def command_inspect(args: argparse.Namespace) -> int:
         gps_available = isinstance(gps, dict) and gps.get("latitude") is not None and gps.get("longitude") is not None
         record["metadata_status"] = "error" if record.get("probe_error") else "ok" if gps_available or any(record.get(key) is not None for key in ("duration_seconds", "width", "height", "captured_at")) else "partial"
         assets.append(record)
+        seen_by_hash[digest] = record
         if reused:
             new_cache[digest] = {**cache_record, "metadata": metadata}
 
@@ -756,7 +780,11 @@ def command_inspect(args: argparse.Namespace) -> int:
     }
     write_json(manifest_path, manifest)
     write_json(cache_path, {"cache_version": 2, "entries": new_cache})
-    print(f"Inspected {len(assets)} asset(s); reused cached metadata for {sum(1 for item in assets if item['cache_reused'])}.")
+    print(
+        f"Inspected {len(assets)} unique asset(s) from {scanned_count} media file(s); "
+        f"collapsed {scanned_count - len(assets)} exact duplicate(s); "
+        f"reused cached metadata for {sum(1 for item in assets if item['cache_reused'])}."
+    )
     print(f"Manifest: {manifest_path}")
     if errors:
         print("Some files could not be fully inspected:", file=sys.stderr)
@@ -1134,7 +1162,7 @@ def prepare_heic_render_asset(source: Path, output: Path, expected_source_hash: 
     """Create or reuse a verified JPEG derivative for a HEIC render source."""
     from media_helpers import decode_heic_output
 
-    conversion = "heic-decoder-verified-jpeg-v2"
+    conversion = "heic-decoder-verified-jpeg-v3"
     max_dimension = 4096
     metadata_path = output.with_suffix(output.suffix + ".json")
     if sha256_file(source) != expected_source_hash:
@@ -1252,7 +1280,7 @@ def command_prepare_render(args: argparse.Namespace) -> int:
             name = stable_asset_filename(relative_source, source_path, current_hash)
             is_heif = source_path.suffix.lower() in {".heic", ".heif"}
             if segment.get("type") == "photo" and is_heif:
-                name = f"{Path(name).stem}-heif-v2.jpg"
+                name = f"{Path(name).stem}-heif-v3.jpg"
             asset_path = public_assets / name
             if not is_within(asset_path, project_path(project, "work")):
                 raise UserFacingError(f"Render asset copy would escape work/: {asset_path}")
@@ -1302,12 +1330,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = subparsers.add_parser("init", help="create the standard project folders and a reviewable job.draft.yaml")
+    init_parser = subparsers.add_parser("init", help="create the standard project folders and a job.draft.yaml")
     add_project_argument(init_parser)
     init_parser.add_argument("--profile", help="profile to place in a newly created job.draft.yaml")
     init_parser.set_defaults(func=command_init)
 
-    inspect_parser = subparsers.add_parser("inspect", help="hash assets and build/cache media metadata")
+    inspect_parser = subparsers.add_parser("inspect", help="hash project media and build/cache metadata from assets/ and the project root")
     add_project_argument(inspect_parser)
     inspect_parser.set_defaults(func=command_inspect)
 
@@ -1447,9 +1475,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+def _dispatch(args: argparse.Namespace) -> int:
     # Direct execution names this module ``__main__``. Helper modules import
     # ``video_factory`` and must see the same exception classes and path
     # helpers so UserFacingError is caught consistently.
@@ -1505,6 +1531,25 @@ def main(argv: list[str] | None = None) -> int:
     except UserFacingError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    heavy_commands = {
+        "inspect", "draft-captions", "apply-caption-review", "export-srt",
+        "transcribe", "colab-transcribe", "perception", "colab-perception",
+        "extract-scenes", "extract-frames", "extract-audio",
+        "build-contact-sheets", "prepare-render", "qa",
+    }
+    if args.command in heavy_commands:
+        try:
+            with exclusive_heavy_job():
+                return _dispatch(args)
+        except HeavyJobBusy as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 75
+    return _dispatch(args)
 
 
 if __name__ == "__main__":

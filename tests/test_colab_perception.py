@@ -570,7 +570,7 @@ class ColabPerceptionTests(unittest.TestCase):
             project=self.project, privacy_mode=None, gpu="T4", temporal_backend=None,
             temporal_sources=[], allow_upload=False,
         )
-        with patch.object(colab.shutil, "which", side_effect=AssertionError("must not resolve Colab CLI")), patch.object(
+        with patch.object(colab, "_find_colab_cli", side_effect=AssertionError("must not resolve Colab CLI")), patch.object(
             colab, "_run_colab", side_effect=AssertionError("must not start a Colab session"),
         ):
             self.assertEqual(colab.command_colab_perception(args), 0)

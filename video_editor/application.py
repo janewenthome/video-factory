@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from video_editor.pipeline import PipelineOrchestrator, video_factory
+from video_editor.process_lock import exclusive_heavy_job
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,7 @@ class ProjectOptions:
     temporal_backend: str | None = None
     music_mode: str | None = None
     ai_quality: str = "standard"
-    review_gate: str = "REVIEW"
+    review_gate: str = "AUTO"
     allow_upload: bool = False
 
 
@@ -76,6 +77,10 @@ class VideoFactoryApplication:
         return PipelineOrchestrator(**values)
 
     def inspect_source(self, source_dir: str | Path) -> SourceSummary:
+        with exclusive_heavy_job():
+            return self._inspect_source_unlocked(source_dir)
+
+    def _inspect_source_unlocked(self, source_dir: str | Path) -> SourceSummary:
         """Return the GUI home-page summary without copying source media."""
         root = Path(source_dir).expanduser().resolve()
         if not root.is_dir():
@@ -114,41 +119,50 @@ class VideoFactoryApplication:
         )
 
     def run(self, *, approve_review: bool = False, resume: bool = True, force: bool = False, dry_run: bool = False) -> int:
-        return self._orchestrator(
-            approve_review=approve_review,
-            resume=resume,
-            force=force,
-            dry_run=dry_run,
-        ).run()
+        with exclusive_heavy_job():
+            return self._orchestrator(
+                approve_review=approve_review,
+                resume=resume,
+                force=force,
+                dry_run=dry_run,
+            ).run()
 
     def prepare(self) -> None:
-        runner = self._orchestrator()
-        runner.run_stage_1_ingest()
-        runner.run_stage_2_proxy()
-        runner.run_stage_3_scenes()
-        runner.run_stage_4_audio()
-        runner.run_stage_6_contact_sheets()
+        with exclusive_heavy_job():
+            runner = self._orchestrator()
+            runner.run_stage_1_ingest()
+            runner.run_stage_2_proxy()
+            runner.run_stage_3_scenes()
+            runner.run_stage_4_audio()
+            runner.run_stage_6_contact_sheets()
 
     def analyze(self) -> None:
-        runner = self._orchestrator()
-        runner.run_stage_5_transcription()
-        runner.run_stage_7_perception()
-        runner.run_stage_8_editorial_analysis()
+        with exclusive_heavy_job():
+            runner = self._orchestrator()
+            runner.run_stage_5_transcription()
+            runner.run_stage_7_perception()
+            runner.run_stage_8_editorial_analysis()
 
     def plan(self) -> None:
-        runner = self._orchestrator()
-        runner.run_stage_9_edit_plan()
-        runner.run_stage_10_validate()
+        with exclusive_heavy_job():
+            runner = self._orchestrator()
+            runner.run_stage_9_edit_plan()
+            runner.run_stage_10_validate()
 
     def prepare_music(self) -> None:
         """Create the music requirement and licensing artifacts for the plan."""
-        runner = self._orchestrator()
-        runner.run_stage_9_edit_plan()
+        with exclusive_heavy_job():
+            runner = self._orchestrator()
+            runner.run_stage_9_edit_plan()
 
     def render(self, *, approve_review: bool = True) -> None:
-        runner = self._orchestrator(approve_review=approve_review, gate="AUTO" if approve_review else self.options.review_gate)
-        runner.run_stage_11_render()
-        runner.run_stage_12_qa()
+        with exclusive_heavy_job():
+            runner = self._orchestrator(approve_review=approve_review, gate="AUTO" if approve_review else self.options.review_gate)
+            runner.run_stage_11_render()
+            runner.run_stage_12_qa()
 
 
-__all__ = ["ProjectOptions", "SourceSummary", "VideoFactoryApplication"]
+from video_editor.queue_runner import VideoFactoryQueue  # noqa: E402
+
+
+__all__ = ["ProjectOptions", "SourceSummary", "VideoFactoryApplication", "VideoFactoryQueue"]

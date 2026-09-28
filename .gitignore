@@ -12,6 +12,7 @@ ENV/
 .cache/
 .pnpm-store/
 .pytest_cache/
+.video-factory/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/

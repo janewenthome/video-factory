@@ -23,6 +23,9 @@ from video_editor.music_catalog import (
     MusicCatalogError,
     OpenverseAudioCatalog,
 )
+from video_editor.job_queue import JobQueueError, QueueAlreadyRunning
+from video_editor.process_lock import HeavyJobBusy, exclusive_heavy_job
+from video_editor.queue_runner import QueueApplicationError, VideoFactoryQueue
 
 
 def resolve_project_or_stage_raw(target: str, mode: str = "family") -> Path:
@@ -193,6 +196,109 @@ def command_music_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _queue_service(args: argparse.Namespace) -> VideoFactoryQueue:
+    return VideoFactoryQueue(queue_file=getattr(args, "queue_file", None))
+
+
+def command_queue_add(args: argparse.Namespace) -> int:
+    job = _queue_service(args).enqueue_project(
+        args.project,
+        max_attempts=args.max_attempts,
+        force=args.force,
+    )
+    print(f"Queued {job['project_path']} as {job['id']} (pending).")
+    print("The runner executes one local project at a time; the queue is stored outside the public repository.")
+    return 0
+
+
+def command_queue_list(args: argparse.Namespace) -> int:
+    state = _queue_service(args).list_jobs()
+    if state["paused"]:
+        print(f"Queue paused: {state.get('pause_reason') or 'paused by user'}")
+    else:
+        print("Queue active")
+    jobs = state["jobs"]
+    if not jobs:
+        print("No queued projects.")
+        return 0
+    for job in jobs:
+        attempt_text = f"{job['attempts']}/{job['max_attempts']}"
+        print(f"{job['id']}  {job['status']:<10}  attempts {attempt_text:<5}  {job['project_path']}")
+        if job.get("last_error"):
+            print(f"  Last error: {job['last_error']}")
+        if job.get("runtime", {}).get("log_path"):
+            print(f"  Log: {job['runtime']['log_path']}")
+    return 0
+
+
+def command_queue_run(args: argparse.Namespace) -> int:
+    service = _queue_service(args)
+
+    def emit(event: dict) -> None:
+        message = event.get("message")
+        if message:
+            print(f"[queue] {message}")
+        elif event.get("type") == "queue_job_started":
+            print(f"[queue] Starting {event['project_path']}")
+        elif event.get("type") == "queue_job_process_started":
+            print(f"[queue] Pipeline PID {event['pid']}")
+        elif event.get("type") == "queue_job_process_completed":
+            print(f"[queue] Project complete. Log: {event['log_path']}")
+
+    service.on_progress = emit
+    try:
+        summary = service.run(
+            cooldown_seconds=args.cooldown_seconds,
+            poll_seconds=args.poll_seconds,
+            max_rechecks=args.max_rechecks,
+            max_jobs=args.max_jobs,
+        )
+    except QueueAlreadyRunning as exc:
+        print(f"[queue] {exc}", file=sys.stderr)
+        return 75
+    except (JobQueueError, QueueApplicationError, HeavyJobBusy, ValueError) as exc:
+        print(f"[queue] {exc}", file=sys.stderr)
+        return 2
+
+    print(
+        "Queue run finished: "
+        f"{summary.jobs_completed} completed, {summary.jobs_failed} failed, "
+        f"{summary.jobs_cancelled} cancelled, {summary.attempts_started} attempt(s)."
+    )
+    if summary.paused:
+        print(f"Queue paused: {summary.pause_reason or 'system resource gate'}")
+        return 75
+    return 2 if summary.jobs_failed else 0
+
+
+def command_queue_pause(args: argparse.Namespace) -> int:
+    reason = args.reason or "Paused by user. The current project will finish before the queue stops."
+    _queue_service(args).pause(reason)
+    print(f"Queue paused. {reason}")
+    return 0
+
+
+def command_queue_resume(args: argparse.Namespace) -> int:
+    _queue_service(args).resume()
+    print("Queue resumed. Run `python -m video_editor queue run` to continue pending projects.")
+    return 0
+
+
+def command_queue_cancel(args: argparse.Namespace) -> int:
+    result = _queue_service(args).cancel(args.job_id)
+    if result == "cancellation_requested":
+        print("Cancellation requested. The runner will stop and reap this job's process group before starting another.")
+    else:
+        print(f"Queue job status: {result}")
+    return 0
+
+
+def command_queue_reorder(args: argparse.Namespace) -> int:
+    _queue_service(args).reorder(args.job_ids)
+    print("Pending projects reordered.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="video_editor",
@@ -209,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--no-gpu", action="store_true", help="run CPU only; skip cloud GPU inference")
     run_parser.add_argument("--gpu", default="T4", help="Colab GPU accelerator (default: T4)")
     run_parser.add_argument("--allow-upload", action="store_true", help="authorize sending audio to Colab on cache miss")
-    run_parser.add_argument("--gate", choices=("AUTO", "REVIEW", "MANUAL"), default="REVIEW", help="human review gate policy")
+    run_parser.add_argument("--gate", choices=("AUTO", "REVIEW", "MANUAL"), default="AUTO", help="human review gate policy (AUTO creates a first cut by default)")
     run_parser.add_argument("--approve-review", action="store_true", help="confirm the current edit summary and allow render")
     run_parser.add_argument("--duration-preset", choices=("short", "standard", "full"), default=None, help="family/health duration preset")
     run_parser.add_argument("--duration-seconds", type=float, default=None, help="custom target duration; overrides preset")
@@ -282,13 +388,65 @@ def build_parser() -> argparse.ArgumentParser:
     music_add_parser.add_argument("--project", required=True, help="project containing the matching search snapshot")
     music_add_parser.set_defaults(func=command_music_add)
 
+    queue_parser = subparsers.add_parser("queue", help="queue several ready projects and process them serially")
+    queue_subparsers = queue_parser.add_subparsers(dest="queue_action", required=True)
+
+    queue_add_parser = queue_subparsers.add_parser("add", help="queue a project with completed story and edit plans")
+    queue_add_parser.add_argument("project", help="project path with job.yaml, story_plan.json and edit_plan.json")
+    queue_add_parser.add_argument("--max-attempts", type=int, default=2, help="attempt limit including one retry by default")
+    queue_add_parser.add_argument("--force", action="store_true", help="rerun cached stages as well as render")
+    queue_add_parser.set_defaults(func=command_queue_add)
+
+    queue_list_parser = queue_subparsers.add_parser("list", help="show queue order, status, attempts and logs")
+    queue_list_parser.set_defaults(func=command_queue_list)
+
+    queue_run_parser = queue_subparsers.add_parser("run", help="run pending projects one at a time")
+    queue_run_parser.add_argument("--cooldown-seconds", type=float, default=45.0, help="wait between projects before checking memory (default: 45)")
+    queue_run_parser.add_argument("--poll-seconds", type=float, default=30.0, help="interval for memory-pressure rechecks (default: 30)")
+    queue_run_parser.add_argument("--max-rechecks", type=int, default=3, help="pause after this many unsafe/incomplete readings")
+    queue_run_parser.add_argument("--max-jobs", type=int, default=None, help="stop after this many attempts; useful for a bounded run")
+    queue_run_parser.set_defaults(func=command_queue_run)
+
+    queue_pause_parser = queue_subparsers.add_parser("pause", help="finish the current project, then pause the queue")
+    queue_pause_parser.add_argument("--reason", default=None)
+    queue_pause_parser.set_defaults(func=command_queue_pause)
+
+    queue_resume_parser = queue_subparsers.add_parser("resume", help="clear a user or memory-pressure pause")
+    queue_resume_parser.set_defaults(func=command_queue_resume)
+
+    queue_cancel_parser = queue_subparsers.add_parser("cancel", help="cancel one pending project or stop a running job safely")
+    queue_cancel_parser.add_argument("job_id")
+    queue_cancel_parser.set_defaults(func=command_queue_cancel)
+
+    queue_reorder_parser = queue_subparsers.add_parser("reorder", help="reorder all pending jobs; include every pending ID once")
+    queue_reorder_parser.add_argument("job_ids", nargs="+", help="pending job IDs in the desired order")
+    queue_reorder_parser.set_defaults(func=command_queue_reorder)
+
+    for command_parser in queue_subparsers.choices.values():
+        command_parser.add_argument(
+            "--queue-file",
+            default=None,
+            help="optional queue JSON path; otherwise use VIDEO_FACTORY_QUEUE_FILE or the checkout-local private queue",
+        )
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    if args.command in {"run", "prepare", "analyze", "plan", "render", "perception", "colab-perception"}:
+        try:
+            with exclusive_heavy_job():
+                return args.func(args)
+        except HeavyJobBusy as exc:
+            print(f"[video_editor] {exc}", file=sys.stderr)
+            return 75
+    try:
+        return args.func(args)
+    except (JobQueueError, QueueApplicationError, ValueError) as exc:
+        print(f"[video_editor] {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
